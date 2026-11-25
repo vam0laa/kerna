@@ -232,6 +232,9 @@ func metrics(r Report, h *Hist) []metric {
 		} else {
 			note += ", " + strings.ToLower(b.Status)
 		}
+		if st.Profile != "" && strings.EqualFold(b.Status, "Discharging") {
+			note += ", " + L("profile ", "profil ") + st.Profile
+		}
 		mx := 60.0
 		if b.Watts > mx {
 			mx = b.Watts

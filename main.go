@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -25,9 +26,17 @@ func usage() {
   kerna history --at 03:12 what was going on at that moment
   kerna service install    record history in the background (a systemd user service)
   kerna service uninstall  stop recording
+  kerna why-froze          why did the last session end badly? (reads the system log with journalctl)
+  kerna snapshot [name]    save a measurement, then change something...
+  kerna compare [name]     ...and see what got better or worse
+  kerna waybar             one JSON line for a Waybar custom module
+  kerna ignore [id]        mute a finding (no id: list); kerna unignore <id> brings it back
+  kerna notify on|off      desktop notifications from the recording service
   kerna version
 
 Read-only: it reads /proc and /sys, needs no root and never runs the commands it suggests.
+The only command that runs another program is why-froze (journalctl, read-only).
+Settings: ~/.config/kerna/config.json (optional).
 History stays in ~/.local/state/kerna on this machine and is deleted after 7 days.
 `, `kerna: sistem neden yavaş, sıcak ya da pili tüketiyor?
 
@@ -38,9 +47,17 @@ History stays in ~/.local/state/kerna on this machine and is deleted after 7 day
   kerna history --at 03:12 o anda neler oluyordu
   kerna service install    geçmişi arka planda kaydet (bir systemd kullanıcı servisi)
   kerna service uninstall  kaydı durdur
+  kerna why-froze          son oturum neden kötü bitti? (sistem günlüğünü journalctl ile okur)
+  kerna snapshot [ad]      bir ölçüm kaydet, sonra bir şeyi değiştir...
+  kerna compare [ad]       ...ve neyin iyileştiğini ya da kötüleştiğini gör
+  kerna waybar             Waybar özel modülü için tek satır JSON
+  kerna ignore [id]        bir bulguyu sustur (id yoksa liste); kerna unignore <id> geri getirir
+  kerna notify on|off      kayıt servisinden masaüstü bildirimleri
   kerna version
 
 Salt okunur: /proc ve /sys dosyalarını okur, root gerektirmez ve önerdiği komutları asla çalıştırmaz.
+Başka bir program çalıştıran tek komut why-froze (journalctl, salt okunur).
+Ayarlar: ~/.config/kerna/config.json (isteğe bağlı).
 Geçmiş bu makinede ~/.local/state/kerna içinde durur ve 7 gün sonra silinir.
 `))
 }
@@ -73,7 +90,43 @@ func main() {
 	}
 	pal := palette{useColor(os.Stdout)}
 
+	cfg := LoadConfig()
 	switch cmd {
+	case "ignore", "unignore", "notify":
+		configCmd(cmd, fs.Args())
+	case "why-froze":
+		whyFroze(pal)
+	case "snapshot":
+		name := "last"
+		if fs.NArg() > 0 {
+			name = fs.Arg(0)
+		}
+		rep := src.Sample(win)
+		kept, _ := cfg.Filter(Diagnose(rep))
+		if err := SaveSnap(name, snapOf(rep, kept, time.Now())); err != nil {
+			fmt.Fprintln(os.Stderr, "kerna:", err)
+			os.Exit(2)
+		}
+		fmt.Println(L("Saved. Change something, then run: kerna compare "+name, "Kaydedildi. Bir şeyi değiştir, sonra çalıştır: kerna compare "+name))
+	case "compare":
+		name := "last"
+		if fs.NArg() > 0 {
+			name = fs.Arg(0)
+		}
+		before, err := LoadSnap(name)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "kerna:", err)
+			os.Exit(1)
+		}
+		rep := src.Sample(win)
+		kept, _ := cfg.Filter(Diagnose(rep))
+		for _, l := range CompareLines(pal, before, snapOf(rep, kept, time.Now())) {
+			fmt.Println(l)
+		}
+	case "waybar":
+		rep := src.Sample(time.Second)
+		kept, _ := cfg.Filter(Diagnose(rep))
+		fmt.Println(Waybar(kept))
 	case "version":
 		fmt.Println("kerna", version)
 	case "watch":
@@ -86,7 +139,7 @@ func main() {
 		showHistory(pal, *since, *at)
 	case "", "diagnose":
 		rep := src.Sample(win)
-		fnds := Diagnose(rep)
+		fnds, muted := cfg.Filter(Diagnose(rep))
 		if *asJSON {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -98,6 +151,9 @@ func main() {
 		host, _ := os.Hostname()
 		for _, l := range Frame(pal, rep, fnds, &Hist{}, 80, host, time.Now(), "", false) {
 			fmt.Println(l)
+		}
+		if muted > 0 {
+			fmt.Println(pal.c(cDim, "  "+L(fmt.Sprintf("%d muted finding(s): kerna ignore", muted), fmt.Sprintf("%d susturulmuş bulgu: kerna ignore", muted))))
 		}
 	case "help":
 		usage()
@@ -180,5 +236,67 @@ func service(sub string) {
 	default:
 		usage()
 		os.Exit(2)
+	}
+}
+
+func configCmd(cmd string, args []string) {
+	c := LoadConfig()
+	switch cmd {
+	case "notify":
+		if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+			fmt.Println(L("Notifications: ", "Bildirimler: ") + map[bool]string{true: "on", false: "off"}[c.Notify])
+			fmt.Println(L("Change with: kerna notify on|off", "Değiştirmek için: kerna notify on|off"))
+			return
+		}
+		c.Notify = args[0] == "on"
+		if err := SaveConfig(c); err != nil {
+			fmt.Fprintln(os.Stderr, "kerna:", err)
+			os.Exit(1)
+		}
+		fmt.Println(L("Notifications are "+args[0]+". They need the recording service: kerna service install", "Bildirimler "+args[0]+". Kayıt servisi gerekir: kerna service install"))
+	case "ignore":
+		if len(args) == 0 {
+			if len(c.Ignore) == 0 {
+				fmt.Println(L("Nothing is muted. Mute one with: kerna ignore <id>", "Susturulmuş bir şey yok. Susturmak için: kerna ignore <id>"))
+			}
+			for _, id := range c.Ignore {
+				fmt.Printf("%-18s %s\n", id, titleOf(id))
+			}
+			fmt.Println(L("Known ids: ", "Bilinen id'ler: ") + strings.Join(knownIDs(), ", "))
+			return
+		}
+		if err := validID(args[0]); err != nil {
+			fmt.Fprintln(os.Stderr, "kerna:", err)
+			os.Exit(2)
+		}
+		if c.Mute(args[0]) {
+			SaveConfig(c)
+		}
+		fmt.Println(L("Muted: ", "Susturuldu: ") + titleOf(args[0]))
+	case "unignore":
+		if len(args) != 1 {
+			usage()
+			os.Exit(2)
+		}
+		if c.Unmute(args[0]) {
+			SaveConfig(c)
+		}
+		fmt.Println(L("Back on: ", "Geri açıldı: ") + args[0])
+	}
+}
+
+func whyFroze(pal palette) {
+	boots := []BootReport{scanBoot(-1), scanBoot(0)}
+	var last []Entry
+	if b := boots[0]; b.Checked && !b.Clean && !b.Ended.IsZero() {
+		es, _ := readHistory(historyPath(), b.Ended.Add(-10*time.Minute))
+		for _, e := range es {
+			if !e.T.After(b.Ended) {
+				last = append(last, e)
+			}
+		}
+	}
+	for _, l := range FrozeLines(pal, boots, last) {
+		fmt.Println(l)
 	}
 }

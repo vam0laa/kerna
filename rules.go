@@ -38,7 +38,8 @@ var protected = map[string]bool{
 
 // Thresholds. PSI numbers are the percent of the last 10 seconds in which
 // tasks were stalled, which is what a user perceives as "slow".
-const (
+// They are variables so the config file can change them.
+var (
 	psiWarn      = 10.0
 	psiBad       = 30.0
 	hotC         = 88.0
@@ -325,6 +326,25 @@ func Diagnose(r Report) []Finding {
 		f.Evidence = append(f.Evidence, L("ranked by CPU work and wake-ups: the kernel does not report watts per program without root", "CPU işi ve uyanma sayısına göre sıralı: çekirdek root olmadan program başına watt vermez"))
 		f.Hint = "powerprofilesctl set power-saver"
 		out = append(out, f)
+	}
+
+	// 7. A performance profile while running on battery.
+	if onBattery && (st.Profile == "performance" || st.EPP == "performance") {
+		sev := Info
+		if st.Battery.Watts >= drainWatts {
+			sev = Warn
+		}
+		what := st.Profile
+		src := "/sys/firmware/acpi/platform_profile"
+		if st.Profile != "performance" {
+			what, src = st.EPP, "cpu0/cpufreq/energy_performance_preference"
+		}
+		out = append(out, Finding{ID: "power-profile", Sev: sev,
+			Title: L("A performance power profile is active on battery", "Pilde performans güç profili açık"),
+			Why: L("The system is told to favour speed over battery life, so clocks stay high and the battery drains faster.",
+				"Sisteme pil ömrü yerine hızı tercih etmesi söylenmiş; saat hızları yüksek kalıyor ve pil daha hızlı tükeniyor."),
+			Evidence: []string{fmt.Sprintf("%s = %s", src, what)},
+			Hint:     hint("powerprofilesctl set balanced", "or power-saver for the longest battery life", "ya da en uzun pil ömrü için power-saver")})
 	}
 
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Sev > out[j].Sev })

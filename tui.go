@@ -76,6 +76,7 @@ func watch(src Source, win time.Duration) {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGWINCH)
 
 	pal := palette{useColor(os.Stdout)}
+	cfg := LoadConfig()
 	host, _ := os.Hostname()
 	hist := &Hist{}
 	var rep Report
@@ -118,7 +119,7 @@ func watch(src Source, win time.Duration) {
 	for {
 		select {
 		case rep = <-reports:
-			fnds = Diagnose(rep)
+			fnds, _ = cfg.Filter(Diagnose(rep))
 			if !paused {
 				hist.Add(rep)
 			}

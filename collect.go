@@ -79,6 +79,8 @@ type Static struct {
 	FreqRatio    float64 // current / max, averaged over CPUs; 0 if unknown
 	Battery      *Battery
 	GPUs         []GPU
+	Profile      string // ACPI platform profile: low-power, quiet, balanced, performance
+	EPP          string // CPU energy/performance preference (amd-pstate and intel_pstate)
 }
 
 type Battery struct {
@@ -329,6 +331,8 @@ func (s Source) readStatic() Static {
 			st.MaxTempZone, _ = s.read(strings.TrimPrefix(z, s.Root), "type")
 		}
 	}
+	st.Profile, _ = s.read("sys/firmware/acpi/platform_profile")
+	st.EPP, _ = s.read("sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference")
 	st.Battery = s.readBattery()
 	st.GPUs = s.readGPUs()
 	return st

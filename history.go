@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -47,6 +48,7 @@ var titles = map[string][2]string{
 	"dgpu-awake":       {"A discrete GPU was awake", "Ayrık ekran kartı uyanıktı"},
 	"gpu-busy":         {"A GPU was almost fully busy", "Bir ekran kartı neredeyse tamamen meşguldü"},
 	"battery-drain":    {"The battery was draining fast", "Pil hızlı tükeniyordu"},
+	"power-profile":    {"A performance power profile was active on battery", "Pilde performans güç profili açıktı"},
 }
 
 func titleOf(id string) string {
@@ -139,10 +141,18 @@ func prune(path string, now time.Time) error {
 // record samples forever. Each sample is cheap: a 1 s window every recordEvery.
 func record(src Source, every time.Duration) {
 	last := time.Time{}
+	nt := newNotifier()
 	for {
 		rep := src.Sample(time.Second)
 		now := time.Now()
-		if err := appendEntry(entryOf(rep, Diagnose(rep), now)); err != nil {
+		cfg := LoadConfig() // read every round, so `kerna notify on` and `kerna ignore` need no restart
+		fs, _ := cfg.Filter(Diagnose(rep))
+		if cfg.Notify {
+			for _, f := range nt.observe(fs, now.Unix()) {
+				sendNotification(f)
+			}
+		}
+		if err := appendEntry(entryOf(rep, fs, now)); err != nil {
 			fmt.Fprintln(os.Stderr, "kerna: cannot write history:", err)
 		}
 		if now.Sub(last) > time.Hour {
@@ -273,4 +283,21 @@ func parseAt(s string, now time.Time) (time.Time, error) {
 		t = t.AddDate(0, 0, -1)
 	}
 	return t, nil
+}
+
+// sendNotification shows a desktop notification through notify-send, if it is installed.
+var sendNotification = func(f Finding) {
+	path, err := exec.LookPath("notify-send")
+	if err != nil {
+		return
+	}
+	body := f.Why
+	if len(f.Evidence) > 0 {
+		body += "\n" + f.Evidence[0]
+	}
+	urgency := "normal"
+	if f.Sev == Bad {
+		urgency = "critical"
+	}
+	exec.Command(path, "-a", "kerna", "-u", urgency, "kerna: "+f.Title, body).Run()
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -443,6 +444,231 @@ func TestOnlyNotesStillLooksFine(t *testing.T) {
 	fs := []Finding{{ID: "dgpu-awake", Sev: Info, Title: "A GPU is awake", Why: "w"}}
 	out := strings.Join(Frame(palette{false}, r, fs, &Hist{}, 80, "h", time.Now(), "", false), "\n")
 	if !strings.Contains(out, "Everything looks fine") || !strings.Contains(out, "1 note") || !strings.Contains(out, "── Notes") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
+func TestConfigMuteAndFilter(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	c := LoadConfig()
+	if !c.Mute("dgpu-awake") || c.Mute("dgpu-awake") {
+		t.Fatal("muting twice must report no change the second time")
+	}
+	if err := SaveConfig(c); err != nil {
+		t.Fatal(err)
+	}
+	c = LoadConfig()
+	kept, muted := c.Filter([]Finding{{ID: "dgpu-awake"}, {ID: "cpu-pressure"}})
+	if muted != 1 || len(kept) != 1 || kept[0].ID != "cpu-pressure" {
+		t.Fatalf("kept=%v muted=%d", kept, muted)
+	}
+	if !c.Unmute("dgpu-awake") || c.Unmute("dgpu-awake") {
+		t.Fatal("unmute")
+	}
+	if validID("nope") == nil || validID("cpu-pressure") != nil {
+		t.Fatal("validID")
+	}
+}
+
+func TestConfigThresholdsApplyAndReset(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	defer applyThresholds(Config{})
+	if err := SaveConfig(Config{DrainWatts: 40, HotC: 95}); err != nil {
+		t.Fatal(err)
+	}
+	LoadConfig()
+	if drainWatts != 40 || hotC != 95 || psiWarn != 10 {
+		t.Fatalf("drain=%v hot=%v warn=%v", drainWatts, hotC, psiWarn)
+	}
+	applyThresholds(Config{})
+	if drainWatts != 15 {
+		t.Fatal("defaults must come back")
+	}
+}
+
+func TestBrokenConfigFallsBackToDefaults(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	os.MkdirAll(filepath.Join(dir, "kerna"), 0o755)
+	os.WriteFile(filepath.Join(dir, "kerna", "config.json"), []byte("{not json"), 0o644)
+	if c := LoadConfig(); len(c.Ignore) != 0 {
+		t.Fatalf("got %+v", c)
+	}
+}
+
+func TestNotifierWaitsAMinuteAndDoesNotRepeat(t *testing.T) {
+	n := newNotifier()
+	bad := []Finding{{ID: "cpu-pressure", Sev: Bad}}
+	now := int64(1000)
+	for i := 1; i < notifyAfter; i++ {
+		if got := n.observe(bad, now); len(got) != 0 {
+			t.Fatalf("sample %d must not notify yet", i)
+		}
+		now += 15
+	}
+	if got := n.observe(bad, now); len(got) != 1 {
+		t.Fatal("the fourth sample in a row must notify")
+	}
+	now += 15
+	if got := n.observe(bad, now); len(got) != 0 {
+		t.Fatal("it must not repeat within 30 minutes")
+	}
+	n.observe(nil, now+15) // the problem went away
+	for i := 0; i < notifyAfter; i++ {
+		now += notifyRepeat
+		n.observe(bad, now)
+	}
+	if got := n.observe(bad, now+notifyRepeat); len(got) != 1 {
+		t.Fatal("after 30 minutes it may notify again")
+	}
+	if got := newNotifier().observe([]Finding{{ID: "x", Sev: Info}, {ID: "x", Sev: Info}, {ID: "x", Sev: Info}, {ID: "x", Sev: Info}}, 0); len(got) != 0 {
+		t.Fatal("notes never notify")
+	}
+}
+
+func TestWaybarJSON(t *testing.T) {
+	var o waybarOut
+	if err := json.Unmarshal([]byte(Waybar(nil)), &o); err != nil || o.Class != "ok" || !strings.Contains(o.Text, "ok") {
+		t.Fatalf("ok: %+v %v", o, err)
+	}
+	fs := []Finding{{ID: "a", Sev: Warn, Title: "A & B <x>", Evidence: []string{"e1"}}, {ID: "b", Sev: Bad, Title: "T2"}, {ID: "c", Sev: Info, Title: "N"}}
+	if err := json.Unmarshal([]byte(Waybar(fs)), &o); err != nil {
+		t.Fatal(err)
+	}
+	if o.Class != "bad" || o.Text != "● 2" || !strings.Contains(o.Tooltip, "A &amp; B &lt;x&gt;") || !strings.Contains(o.Tooltip, "› e1") {
+		t.Fatalf("%+v", o)
+	}
+	json.Unmarshal([]byte(Waybar([]Finding{{ID: "c", Sev: Info, Title: "N"}})), &o)
+	if o.Class != "note" || o.Text != "●" {
+		t.Fatalf("note: %+v", o)
+	}
+}
+
+func TestPowerProfileOnBattery(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	f.write("sys/firmware/acpi/platform_profile", "performance")
+	f.write("sys/class/power_supply/BAT1/status", "Discharging")
+	f.write("sys/class/power_supply/BAT1/capacity", "60")
+	f.write("sys/class/power_supply/BAT1/power_now", "9000000")
+	f.write("sys/class/power_supply/BAT1/energy_now", "40000000")
+	f.proc(1, "idle", 0, 100, 0, 0)
+	got := f.diagnose(func() { f.proc(1, "idle", 1, 100, 0, 0) })
+	if ids(got) != "power-profile" || got[0].Sev != Info || !strings.Contains(got[0].Hint, "powerprofilesctl set balanced") {
+		t.Fatalf("got %s %+v", ids(got), got)
+	}
+	f.write("sys/class/power_supply/BAT1/status", "Charging")
+	if got := f.diagnose(func() { f.proc(1, "idle", 2, 100, 0, 0) }); len(got) != 0 {
+		t.Fatalf("plugged in must be quiet, got %s", ids(got))
+	}
+}
+
+func TestCompareShowsBetterWorseAndFixed(t *testing.T) {
+	a := Snap{T: time.Now(), Watts: 33.8, Temp: 60, CPU: 10, GPUState: map[string]string{"NVIDIA": "active"}, Findings: []string{"dgpu-awake", "battery-drain"}}
+	b := Snap{T: time.Now(), Watts: 28.0, Temp: 60.5, CPU: 20, GPUState: map[string]string{"NVIDIA": "suspended"}, Findings: []string{"battery-drain", "cpu-pressure"}}
+	out := strings.Join(CompareLines(palette{false}, a, b), "\n")
+	for _, want := range []string{"↓ 5.8 W better", "Temperature", "same", "↑ 10.0% worse", "NVIDIA GPU", "suspended ✔", "gone: A discrete GPU was awake", "new: Programs were waiting for the CPU"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestSnapshotRoundTripAndNameCheck(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := SaveSnap("before-fix", Snap{Watts: 12}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadSnap("before-fix")
+	if err != nil || s.Watts != 12 {
+		t.Fatalf("%+v %v", s, err)
+	}
+	if SaveSnap("../evil", Snap{}) == nil {
+		t.Fatal("a path in the name must be refused")
+	}
+	if _, err := LoadSnap("missing"); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+const sampleKernelLog = `2026-11-25T03:08:11+03:00 host kernel: amdgpu 0000:65:00.0: amdgpu: ring gfx_0.0.0 timeout, signaled seq=1 emitted seq=3
+2026-11-25T03:08:11+03:00 host kernel: amdgpu 0000:65:00.0: amdgpu: GPU reset begin!
+2026-11-25T03:10:55+03:00 host kernel: Out of memory: Killed process 4242 (firefox) total-vm:9000000kB
+2026-11-25T03:11:02+03:00 host kernel: usb 1-1: new device
+`
+
+func TestScanEventsFindsAndMergesBursts(t *testing.T) {
+	ev := ScanEvents(sampleKernelLog)
+	if len(ev) != 2 || ev[0].Kind != "gpu" || ev[1].Kind != "oom" {
+		t.Fatalf("events = %+v", ev)
+	}
+	if !strings.Contains(ev[1].Line, "Killed process 4242 (firefox)") || strings.Contains(ev[1].Line, "2026-11-25") {
+		t.Fatalf("line = %q", ev[1].Line)
+	}
+}
+
+func fakeJournal(kernel, oomd, tail string) {
+	journal = func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "-k"):
+			return kernel, nil
+		case strings.Contains(joined, "systemd-oomd"):
+			return oomd, nil
+		case strings.Contains(joined, "-n 400"):
+			return tail, nil
+		}
+		return "", fmt.Errorf("unexpected %s", joined)
+	}
+}
+
+func TestWhyFrozeNamesTheLastCauseBeforeAnUncleanEnd(t *testing.T) {
+	defer func(old func(...string) (string, error)) { journal = old }(journal)
+	fakeJournal(sampleKernelLog, "", "2026-11-25T03:11:00+03:00 host systemd[1]: something\n2026-11-25T03:11:20+03:00 host kernel: usb 1-1: new device\n")
+	b := scanBoot(-1)
+	if !b.Checked || b.Clean {
+		t.Fatalf("an end without a shutdown message is unclean: %+v", b)
+	}
+	kind, ev, ok := Cause(b)
+	if !ok || kind != "oom" || !strings.Contains(ev.Line, "firefox") {
+		t.Fatalf("cause = %q %+v %v", kind, ev, ok)
+	}
+	out := strings.Join(FrozeLines(palette{false}, []BootReport{b}, nil), "\n")
+	for _, want := range []string{"ended without a normal shutdown", "Most likely: Memory ran out and a program was killed", "kerna has no history"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestRealShutdownMarkersCountAsClean(t *testing.T) {
+	// taken from a real journal: no "Reached target", only these
+	tail := "2026-11-25T03:00:08+03:00 vamola systemd[1]: Stopped target Local File Systems.\n2026-11-25T03:00:08+03:00 vamola systemd[1]: Unmounted /boot.\n"
+	if clean, ended := EndOfBoot(tail); !clean || ended.Hour() != 3 {
+		t.Fatalf("clean=%v ended=%v", clean, ended)
+	}
+	if clean, _ := EndOfBoot("2026-11-25T03:11:20+03:00 host kernel: usb 1-1: new device\n"); clean {
+		t.Fatal("an ordinary line is not a shutdown")
+	}
+}
+
+func TestWhyFrozeCleanShutdownAndNoCause(t *testing.T) {
+	defer func(old func(...string) (string, error)) { journal = old }(journal)
+	fakeJournal("", "", "2026-11-25T03:00:07+03:00 host systemd[1]: Reached target System Power Off.\n2026-11-25T03:00:08+03:00 host systemd-shutdown[1]: Syncing filesystems\n")
+	b := scanBoot(-1)
+	if !b.Clean {
+		t.Fatalf("%+v", b)
+	}
+	if _, _, ok := Cause(b); ok {
+		t.Fatal("a clean shutdown has no cause")
+	}
+	fakeJournal(sampleKernelLog, "", "2026-11-25T05:30:00+03:00 host kernel: usb 1-1: new device\n")
+	b = scanBoot(-1)
+	if _, _, ok := Cause(b); ok {
+		t.Fatal("events hours before the end must not be blamed")
+	}
+	out := strings.Join(FrozeLines(palette{false}, []BootReport{b}, nil), "\n")
+	if !strings.Contains(out, "hard freeze or a power loss") {
 		t.Fatalf("output:\n%s", out)
 	}
 }
