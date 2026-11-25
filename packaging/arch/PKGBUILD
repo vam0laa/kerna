@@ -7,6 +7,7 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/vam0laa/kerna"
 license=('MIT')
 makedepends=('go')
+options=('!debug')
 optdepends=(
   'wl-clipboard: copy commands from kerna watch (c key)'
   'libnotify: desktop notifications (kerna notify on)'
@@ -14,7 +15,7 @@ optdepends=(
   'iotop: per-process disk use for every user'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP') # replace with the real checksum before publishing
+sha256sums=('9509d1926b0644028dbfaafe0e4264e89f09fe184dc30cd953be272db811b75e')
 
 build() {
   cd "$pkgname-$pkgver"
