@@ -27,6 +27,8 @@ func usage() {
   kerna history --today    a summary of today: battery, busiest programs, problems
   kerna sleep              suspend problems and battery drain while asleep
   kerna why <name|pid>     look closely at one program: now vs its whole life, threads, GPU, children
+  kerna check              what kerna can and cannot see on this machine (paste it into bug reports)
+  kerna completion fish    shell completion (fish, bash or zsh)
   kerna service install    record history in the background (a systemd user service)
   kerna service uninstall  stop recording
   kerna why-froze          why did the last session end badly? (reads the system log with journalctl)
@@ -51,6 +53,8 @@ History stays in ~/.local/state/kerna on this machine and is deleted after 7 day
   kerna history --today    bugünün özeti: pil, en yoğun programlar, sorunlar
   kerna sleep              uyku sorunları ve uykudayken pil tüketimi
   kerna why <ad|pid>       tek bir programa yakından bak: şimdi ve tüm ömrü, iş parçacıkları, GPU, alt programlar
+  kerna check              kerna bu makinede neyi görebiliyor, neyi göremiyor (hata bildirimine yapıştır)
+  kerna completion fish    kabuk tamamlama (fish, bash ya da zsh)
   kerna service install    geçmişi arka planda kaydet (bir systemd kullanıcı servisi)
   kerna service uninstall  kaydı durdur
   kerna why-froze          son oturum neden kötü bitti? (sistem günlüğünü journalctl ile okur)
@@ -160,6 +164,21 @@ func main() {
 			return
 		}
 		showHistory(pal, *since, *at)
+	case "check":
+		for _, l := range CheckLines(pal, src.Check()) {
+			fmt.Println(l)
+		}
+	case "completion":
+		if len(pos) != 1 {
+			fmt.Fprintln(os.Stderr, L("usage: kerna completion fish|bash|zsh", "kullanım: kerna completion fish|bash|zsh"))
+			os.Exit(2)
+		}
+		s, err := Completion(pos[0])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "kerna:", err)
+			os.Exit(2)
+		}
+		fmt.Print(s)
 	case "why":
 		if len(pos) != 1 {
 			usage()

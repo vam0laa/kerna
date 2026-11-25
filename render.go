@@ -464,7 +464,14 @@ func FrameOpts(p palette, r Report, fs []Finding, h *Hist, width int, host strin
 		}
 		if f.Hint != "" {
 			cmd, comment, _ := strings.Cut(f.Hint, "   # ")
-			out = append(out, "    "+p.c(cDim, "$ ")+p.c(cBold, cmd))
+			// the whole command stays on screen, wrapped with a hanging indent; the c key copies it in one piece
+			for i, l := range wrap(cmd, width-8) {
+				if i == 0 {
+					out = append(out, "    "+p.c(cDim, "$ ")+p.c(cBold, l))
+				} else {
+					out = append(out, "      "+p.c(cBold, l))
+				}
+			}
 			for _, l := range wrap(comment, width-6) {
 				out = append(out, "      "+p.c(cDim, l))
 			}
@@ -552,7 +559,7 @@ func MomentLines(p palette, e Entry, width int) []string {
 			col = cAccent
 		}
 		out = append(out, "  "+p.c(col, "●")+" "+p.c(cBold, titleOf(f.ID)))
-		for _, ev := range f.Evidence {
+		for _, ev := range f.EvidenceText() {
 			for i, l := range wrap(ev, width-8) {
 				lead := "      "
 				if i == 0 {

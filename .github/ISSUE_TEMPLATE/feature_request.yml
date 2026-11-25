@@ -1,0 +1,16 @@
+name: Idea or feature request
+description: Something kerna should explain
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What should kerna tell you?
+      description: Describe the situation ("my laptop is hot but nothing shows up...") rather than the solution. kerna answers "why", so the best ideas start with a symptom.
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: Where does that information live? (optional)
+      description: A file in /proc or /sys, a kernel counter, a log line.

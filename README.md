@@ -4,6 +4,8 @@
 show you numbers. `kerna` reads the same kernel data and tells you the *reason*, names the program
 behind it, and suggests what to try. In English or Türkçe.
 
+<p align="center"><img src="docs/screenshot.png" alt="kerna watch: a verdict, six live lines and, below, only what needs attention" width="560"></p>
+
 ```
 $ kerna
 kerna  why is my system like this
@@ -34,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/vam0laa/kerna/main/install.sh | sh
 ```
 
 No root needed: it installs to `~/.local/bin`, after checking the SHA-256 of the download. Or grab
-a tarball from the [releases](https://github.com/vam0laa/kerna/releases/latest), or `make build`.
+a tarball from the [releases](https://github.com/vam0laa/kerna/releases/latest), or `make build`. On Arch, `packaging/arch/PKGBUILD` builds a package from source (not on the AUR yet).
 
 ## Use
 
@@ -46,6 +48,9 @@ kerna history              # problems in the last 24 hours (--since 3d for longe
 kerna history --at 03:12   # what was going on at that moment
 kerna service install      # record history in the background (a systemd user service)
 kerna service uninstall    # stop recording
+kerna why qs               # look closely at one program
+kerna check                # what kerna can see on this machine (paste it into bug reports)
+kerna completion fish      # shell completion for fish, bash or zsh
 ```
 
 `kerna watch` keys: `q` quit, `p` pause, `j`/`k` (or Tab) select a finding, `c` copy its command to the

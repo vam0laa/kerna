@@ -635,3 +635,23 @@ func parseDRMFdinfo(text string) (clientID string, ns uint64, ok bool) {
 	}
 	return clientID, ns, ok && clientID != ""
 }
+
+// snapProcQuick tells whether a process has a DRM client whose fdinfo we can read.
+func (s Source) snapProcQuick(name string) (bool, bool) {
+	fds, err := os.ReadDir(s.p("proc", name, "fd"))
+	if err != nil {
+		return false, false
+	}
+	for _, fd := range fds {
+		dst, err := os.Readlink(s.p("proc", name, "fd", fd.Name()))
+		if err != nil || !strings.HasPrefix(dst, "/dev/dri/") {
+			continue
+		}
+		if txt, ok := s.read("proc", name, "fdinfo", fd.Name()); ok {
+			if _, _, ok := parseDRMFdinfo(txt); ok {
+				return true, true
+			}
+		}
+	}
+	return false, true
+}

@@ -1014,3 +1014,106 @@ func TestWhyFindsByPartOfTheNameAndPid(t *testing.T) {
 		t.Fatalf("no match: %v", got)
 	}
 }
+
+func TestHistoryEvidenceReadsInBothLanguages(t *testing.T) {
+	old := lang
+	defer func() { lang = old }()
+	lang = "en"
+	r := Report{Window: time.Second, PSI: map[string]PSI{"cpu": {SomeAvg10: 40}}, Procs: []Rate{{PID: 1, Comm: "ffmpeg", CPU: 300}}}
+	cur, en, tr := diagnoseBoth(r, Config{})
+	if lang != "en" {
+		t.Fatal("the language must be restored")
+	}
+	if len(cur) != 1 || len(en) != 1 || len(tr) != 1 {
+		t.Fatalf("%d %d %d", len(cur), len(en), len(tr))
+	}
+	e := entryOfBoth(r, en, tr, time.Now())
+	if len(e.Findings) != 1 {
+		t.Fatalf("%+v", e.Findings)
+	}
+	lang = "en"
+	if got := e.Findings[0].EvidenceText(); len(got) == 0 || !strings.Contains(got[0], "of one core") {
+		t.Fatalf("english: %v", got)
+	}
+	lang = "tr"
+	if got := e.Findings[0].EvidenceText(); len(got) == 0 || !strings.Contains(got[0], "çekirdeğin") {
+		t.Fatalf("turkish: %v", got)
+	}
+}
+
+func TestCompletionScripts(t *testing.T) {
+	for _, shell := range []string{"fish", "bash", "zsh"} {
+		s, err := Completion(shell)
+		if err != nil || !strings.Contains(s, "why-froze") || !strings.Contains(s, "dgpu-awake") {
+			t.Fatalf("%s: %v\n%s", shell, err, s)
+		}
+	}
+	if _, err := Completion("powershell"); err == nil {
+		t.Fatal("unknown shell must be refused")
+	}
+}
+
+func TestCheckReportsWhatIsMissing(t *testing.T) {
+	f := newFixture(t)
+	f.write("proc/sys/kernel/osrelease", "7.0.0-test")
+	f.write("proc/pressure/cpu", "some avg10=0 avg60=0 avg300=0 total=0\n") // io and memory are missing
+	f.write("sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "1000")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	out := strings.Join(CheckLines(palette{false}, Source{Root: f.root}.Check()), "\n")
+	for _, want := range []string{"7.0.0-test", "✖ Pressure stall info (PSI)", "need a kernel with PSI", "– Battery", "not recording", "no host name"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestFooterNeverWrapsAndKeysAreDocumented(t *testing.T) {
+	for _, w := range []int{120, 90, 70, 50, 30, 12} {
+		if got := footerFor(w, "main"); vlen(got) > w {
+			t.Fatalf("footer of %d columns is %d wide: %q", w, vlen(got), got)
+		}
+	}
+	if got := footerFor(120, "main"); !strings.Contains(got, "d today") {
+		t.Fatalf("wide terminals get every key: %q", got)
+	}
+	if got := footerFor(40, "main"); !strings.Contains(got, "?") {
+		t.Fatalf("narrow terminals point to the help: %q", got)
+	}
+	help := strings.Join(HelpLines(palette{false}), "\n")
+	for _, k := range []string{"j / k / Tab", "copy", "mute", "programs", "history", "today", "this help"} {
+		if !strings.Contains(help, k) {
+			t.Fatalf("help lacks %q:\n%s", k, help)
+		}
+	}
+}
+
+func TestLongCommandsWrapWithAHangingIndent(t *testing.T) {
+	long := "echo 'options nvidia NVreg_DynamicPowerManagement=0x02' | sudo tee /etc/modprobe.d/nvidia-pm.conf"
+	r := Report{Window: time.Second, PSI: map[string]PSI{}, Static: Static{MemTotalKiB: 100, MemAvailKiB: 50}}
+	fs := []Finding{{ID: "a", Sev: Warn, Title: "T", Why: "w", Hint: long + "   # comment"}}
+	lines := Frame(palette{false}, r, fs, &Hist{}, 60, "h", time.Now(), "", false)
+	var cmdLines []string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "    $ ") || (len(cmdLines) > 0 && strings.HasPrefix(l, "      ") && !strings.Contains(l, "comment") && len(cmdLines) < 4) {
+			cmdLines = append(cmdLines, l)
+		}
+	}
+	joined := strings.Join(cmdLines, " ")
+	if len(cmdLines) < 2 || !strings.Contains(joined, "/etc/modprobe.d/nvidia-pm.conf") {
+		t.Fatalf("the command must stay complete across lines: %q", cmdLines)
+	}
+	for _, l := range lines {
+		if vlen(l) > 62 {
+			t.Fatalf("line wider than the frame: %q", l)
+		}
+	}
+}
+
+func TestFrameStartsWithTheHeader(t *testing.T) {
+	r := Report{Window: time.Second, PSI: map[string]PSI{}, Static: Static{MemTotalKiB: 100, MemAvailKiB: 50}}
+	lines := Frame(palette{false}, r, nil, &Hist{}, 80, "myhost", time.Now(), "", true)
+	if !strings.HasPrefix(lines[0], "kerna") || !strings.Contains(lines[0], "myhost") {
+		t.Fatalf("first line: %q", lines[0])
+	}
+}

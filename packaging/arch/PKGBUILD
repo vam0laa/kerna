@@ -1,0 +1,38 @@
+# Maintainer: vam0laa
+pkgname=kerna
+pkgver=0.7.0
+pkgrel=1
+pkgdesc="Explains why a Linux system is slow, hot or draining the battery"
+arch=('x86_64' 'aarch64')
+url="https://github.com/vam0laa/kerna"
+license=('MIT')
+makedepends=('go')
+optdepends=(
+  'wl-clipboard: copy commands from kerna watch (c key)'
+  'libnotify: desktop notifications (kerna notify on)'
+  'nvtop: live GPU use per program'
+  'iotop: per-process disk use for every user'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP') # replace with the real checksum before publishing
+
+build() {
+  cd "$pkgname-$pkgver"
+  export CGO_ENABLED=0
+  go build -trimpath -ldflags "-s -w -X main.version=v$pkgver" -o "$pkgname" .
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  go test ./...
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  ./"$pkgname" completion fish | install -Dm644 /dev/stdin "$pkgdir/usr/share/fish/vendor_completions.d/$pkgname.fish"
+  ./"$pkgname" completion bash | install -Dm644 /dev/stdin "$pkgdir/usr/share/bash-completion/completions/$pkgname"
+  ./"$pkgname" completion zsh  | install -Dm644 /dev/stdin "$pkgdir/usr/share/zsh/site-functions/_$pkgname"
+}

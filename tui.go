@@ -95,6 +95,8 @@ func watch(src Source, win time.Duration) {
 		case view == "history":
 			es, _ := readHistory(historyPath(), time.Now().Add(-24*time.Hour))
 			lines = HistoryLines(pal, es, 24*time.Hour, cols-2)
+		case view == "help":
+			lines = HelpLines(pal)
 		case view == "today":
 			es, _ := readHistory(historyPath(), time.Now().Add(-24*time.Hour))
 			lines = TodayLines(pal, es, time.Now())
@@ -107,12 +109,9 @@ func watch(src Source, win time.Duration) {
 			}
 			lines = FrameOpts(pal, rep, fnds, hist, cols-2, host, time.Now(), note, true, Opts{Sel: sel, Top: showTop})
 		}
-		foot := L("q quit  ·  p pause  ·  t programs  ·  j/k select  ·  c copy  ·  i mute  ·  h history  ·  d today", "q çık  ·  p duraklat  ·  t programlar  ·  j/k seç  ·  c kopyala  ·  i sustur  ·  h geçmiş  ·  d bugün")
-		if view != "main" {
-			foot = L("q quit  ·  esc/h/d back", "q çık  ·  h/d geri")
-		}
+		foot := footerFor(cols-4, view)
 		if toast != "" && time.Now().Before(toastUntil) {
-			foot = toast
+			foot = clip(toast, cols-4)
 		}
 		if len(lines) > rows-2 {
 			lines = append(lines[:rows-3], pal.c(cDim, "  …"))
@@ -171,6 +170,13 @@ func watch(src Source, win time.Duration) {
 				draw()
 			case 't', 'T':
 				showTop = !showTop
+				draw()
+			case '?':
+				if view == "help" {
+					view = "main"
+				} else {
+					view = "help"
+				}
 				draw()
 			case 'j', 'J', 9:
 				if len(fnds) > 0 {
@@ -236,4 +242,49 @@ func copyToClipboard(s string) error {
 		}
 	}
 	return fmt.Errorf("no clipboard tool")
+}
+
+// footerFor picks the longest key list that fits, so it never wraps and scrolls the screen.
+func footerFor(width int, view string) string {
+	var options []string
+	if view != "main" {
+		options = []string{
+			L("q quit  ·  esc back", "q çık  ·  esc geri"),
+			L("q quit", "q çık"),
+		}
+	} else {
+		options = []string{
+			L("q quit  ·  p pause  ·  t programs  ·  j/k select  ·  c copy  ·  i mute  ·  h history  ·  d today", "q çık  ·  p duraklat  ·  t programlar  ·  j/k seç  ·  c kopyala  ·  i sustur  ·  h geçmiş  ·  d bugün"),
+			L("q quit  ·  p pause  ·  t programs  ·  c copy  ·  i mute  ·  h history  ·  ? keys", "q çık  ·  p duraklat  ·  t programlar  ·  c kopyala  ·  i sustur  ·  h geçmiş  ·  ? tuşlar"),
+			L("q quit  ·  t programs  ·  ? all keys", "q çık  ·  t programlar  ·  ? tüm tuşlar"),
+			L("q quit  ·  ? keys", "q çık  ·  ? tuşlar"),
+		}
+	}
+	for _, o := range options {
+		if vlen(o) <= width {
+			return o
+		}
+	}
+	return clip(options[len(options)-1], width)
+}
+
+// HelpLines lists every key of the live view.
+func HelpLines(p palette) []string {
+	keys := [][2]string{
+		{"q", L("quit", "çık")},
+		{"p", L("pause and resume", "duraklat ve devam ettir")},
+		{"j / k / Tab", L("select the next or previous finding", "sonraki ya da önceki bulguyu seç")},
+		{"c", L("copy the selected finding's command to the clipboard", "seçili bulgunun komutunu panoya kopyala")},
+		{"i", L("mute the selected finding (kerna unignore brings it back)", "seçili bulguyu sustur (kerna unignore geri getirir)")},
+		{"t", L("show or hide the busiest programs (CPU, GPU, wake-ups, RAM)", "en yoğun programları göster ya da gizle (CPU, GPU, uyanma, RAM)")},
+		{"h", L("history of the last 24 hours", "son 24 saatin geçmişi")},
+		{"d", L("today's summary", "bugünün özeti")},
+		{"?", L("this help", "bu yardım")},
+		{"Esc", L("back to the main screen", "ana ekrana dön")},
+	}
+	out := []string{p.c(cBold+";"+cAccent, "kerna") + p.c(cDim, "  "+L("keys", "tuşlar")), ""}
+	for _, k := range keys {
+		out = append(out, "  "+p.c(cBold, fmt.Sprintf("%-12s", k[0]))+k[1])
+	}
+	return out
 }

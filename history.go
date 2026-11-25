@@ -24,9 +24,18 @@ const (
 // HFinding is a finding as stored. The title is not stored: it is looked up
 // again in the reader's language.
 type HFinding struct {
-	ID       string   `json:"id"`
-	Sev      Severity `json:"s"`
-	Evidence []string `json:"e,omitempty"`
+	ID         string   `json:"id"`
+	Sev        Severity `json:"s"`
+	Evidence   []string `json:"e,omitempty"` // English
+	EvidenceTR []string `json:"t,omitempty"` // Türkçe: stored too, so the history reads in either language
+}
+
+// EvidenceText returns the evidence in the reader's language.
+func (h HFinding) EvidenceText() []string {
+	if lang == "tr" && len(h.EvidenceTR) > 0 {
+		return h.EvidenceTR
+	}
+	return h.Evidence
 }
 
 // HTop is one of the busiest programs of a sample.
@@ -82,7 +91,25 @@ func stateDir() string {
 
 func historyPath() string { return filepath.Join(stateDir(), "history.jsonl") }
 
+// diagnoseBoth runs the rules once per language, so the stored evidence is not tied
+// to the language of whoever happens to run the recording service.
+func diagnoseBoth(r Report, cfg Config) (current, en, tr []Finding) {
+	saved := lang
+	defer func() { lang = saved }()
+	lang = "en"
+	en, _ = cfg.Filter(Diagnose(r))
+	lang = "tr"
+	tr, _ = cfg.Filter(Diagnose(r))
+	lang = saved
+	current, _ = cfg.Filter(Diagnose(r))
+	return
+}
+
 func entryOf(r Report, fs []Finding, now time.Time) Entry {
+	return entryOfBoth(r, fs, nil, now)
+}
+
+func entryOfBoth(r Report, fs, tr []Finding, now time.Time) Entry {
 	e := Entry{T: now.Truncate(time.Second), CPU: round1(r.CPUBusy * 100), PCPU: r.PSI["cpu"].SomeAvg10,
 		PIO: r.PSI["io"].SomeAvg10, PMem: r.PSI["memory"].SomeAvg10, Temp: round1(r.Static.MaxTempC)}
 	if b := r.Static.Battery; b != nil {
@@ -107,7 +134,13 @@ func entryOf(r Report, fs []Finding, now time.Time) Entry {
 		}
 	}
 	for _, f := range fs {
-		e.Findings = append(e.Findings, HFinding{ID: f.ID, Sev: f.Sev, Evidence: f.Evidence})
+		h := HFinding{ID: f.ID, Sev: f.Sev, Evidence: f.Evidence}
+		for _, g := range tr {
+			if g.ID == f.ID {
+				h.EvidenceTR = g.Evidence
+			}
+		}
+		e.Findings = append(e.Findings, h)
 	}
 	return e
 }
@@ -178,13 +211,13 @@ func record(src Source, every time.Duration) {
 		rep := src.Sample(time.Second)
 		now := time.Now()
 		cfg := LoadConfig() // read every round, so `kerna notify on` and `kerna ignore` need no restart
-		fs, _ := cfg.Filter(Diagnose(rep))
+		fs, fsEN, fsTR := diagnoseBoth(rep, cfg)
 		if cfg.Notify {
 			for _, f := range nt.observe(fs, now.Unix()) {
 				sendNotification(f)
 			}
 		}
-		if err := appendEntry(entryOf(rep, fs, now)); err != nil {
+		if err := appendEntry(entryOfBoth(rep, fsEN, fsTR, now)); err != nil {
 			fmt.Fprintln(os.Stderr, "kerna: cannot write history:", err)
 		}
 		if now.Sub(last) > time.Hour {
@@ -258,8 +291,8 @@ func Incidents(es []Entry) []Incident {
 			in := open[f.ID]
 			if in == nil {
 				ev := ""
-				if len(f.Evidence) > 0 {
-					ev = f.Evidence[0]
+				if evs := f.EvidenceText(); len(evs) > 0 {
+					ev = evs[0]
 				}
 				in = &Incident{ID: f.ID, From: e.T, Evidence: ev}
 				open[f.ID] = in
@@ -333,3 +366,5 @@ var sendNotification = func(f Finding) {
 	}
 	exec.Command(path, "-a", "kerna", "-u", urgency, "kerna: "+f.Title, body).Run()
 }
+
+var timeZero = time.Time{}
