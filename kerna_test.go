@@ -923,3 +923,94 @@ func TestFrameShowsGPUUsersAndColumn(t *testing.T) {
 		}
 	}
 }
+
+// whyProc writes a process with explicit parent, start time and threads.
+func (f *fixture) whyProc(pid, ppid int, comm string, startTicks, ticks uint64, threads map[string]uint64) {
+	stat := func(id int, name string, tk uint64) string {
+		return fmt.Sprintf("%d (%s) S %d 1 1 0 -1 0 0 0 0 0 %d 0 0 0 20 0 1 0 %d 1 2500 0", id, name, ppid, tk, startTicks)
+	}
+	f.write(fmt.Sprintf("proc/%d/stat", pid), stat(pid, comm, ticks))
+	f.write(fmt.Sprintf("proc/%d/comm", pid), comm+"\n")
+	f.write(fmt.Sprintf("proc/%d/cmdline", pid), comm+"\x00-c\x00cfg\x00")
+	f.write(fmt.Sprintf("proc/%d/status", pid), "voluntary_ctxt_switches:\t0\n")
+	i := 0
+	for name, tk := range threads {
+		tid := pid*10 + i
+		f.write(fmt.Sprintf("proc/%d/task/%d/stat", pid, tid), stat(tid, name, tk))
+		f.write(fmt.Sprintf("proc/%d/task/%d/comm", pid, tid), name+"\n")
+		i++
+	}
+}
+
+func TestWhyShowsLifetimeVersusNowThreadsAndChildren(t *testing.T) {
+	f := newFixture(t)
+	f.write("proc/uptime", "1000.00 5000.00\n") // up 1000 s
+	// qs started at tick 0 (so it ran 1000 s) and has used 33000 ticks = 330 s: 33% over its life
+	f.whyProc(500, 1, "qs", 0, 33000, map[string]uint64{"QSGRenderThread": 10000, "qs": 23000})
+	f.whyProc(501, 500, "cava", 50000, 100, map[string]uint64{"cava": 100})
+	src := Source{Root: f.root}
+	done := make(chan struct{})
+	var rep WhyReport
+	var ok bool
+	go func() { rep, ok = src.Why("qs", 300*time.Millisecond); close(done) }()
+	time.Sleep(100 * time.Millisecond)
+	// 60% of one core in the render thread during the window
+	f.whyProc(500, 1, "qs", 0, 33000+60, map[string]uint64{"QSGRenderThread": 10000 + 55, "qs": 23000 + 5})
+	f.whyProc(501, 500, "cava", 50000, 100+5, map[string]uint64{"cava": 105})
+	<-done
+	if !ok || rep.Comm != "qs" || len(rep.PIDs) != 1 {
+		t.Fatalf("%+v ok=%v", rep, ok)
+	}
+	if rep.LifeCPU < 32 || rep.LifeCPU > 34.5 {
+		t.Fatalf("lifetime = %.1f, want about 33", rep.LifeCPU)
+	}
+	if rep.Age < 990*time.Second || rep.Age > 1010*time.Second {
+		t.Fatalf("age = %v", rep.Age)
+	}
+	if len(rep.Threads) == 0 || rep.Threads[0].Name != "QSGRenderThread" {
+		t.Fatalf("threads = %+v", rep.Threads)
+	}
+	if len(rep.Children) != 1 || rep.Children[0].Comm != "cava" {
+		t.Fatalf("children = %+v", rep.Children)
+	}
+	out := strings.Join(WhyLines(palette{false}, rep), "\n")
+	for _, want := range []string{"Quickshell, your desktop shell", "average over its whole life", "Busiest threads", "QSGRenderThread", "Child programs", "cava"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestWhyObservations(t *testing.T) {
+	w := WhyReport{LifeCPU: 46, NowCPU: 10, Threads: []threadUse{{"qs", 3}}}
+	if o := strings.Join(w.Observations(), "\n"); !strings.Contains(o, "much higher than the 10% right now") {
+		t.Fatalf("lifetime vs now: %s", o)
+	}
+	w = WhyReport{LifeCPU: 50, NowCPU: 60, Threads: []threadUse{{"QSGRenderThread", 40}, {"qs", 20}}, GPU: 30, WakeupsPS: 900,
+		Children: []childUse{{"cava", 7, 4.7}}}
+	o := strings.Join(w.Observations(), "\n")
+	for _, want := range []string{`thread "QSGRenderThread": it keeps redrawing`, "GPU busy: 30%", "runs cava (pid 7)", "900 times a second"} {
+		if !strings.Contains(o, want) {
+			t.Fatalf("missing %q in %s", want, o)
+		}
+	}
+	if o := strings.Join(WhyReport{NowCPU: 2}.Observations(), ""); !strings.Contains(o, "Nothing unusual") {
+		t.Fatalf("quiet: %s", o)
+	}
+}
+
+func TestWhyFindsByPartOfTheNameAndPid(t *testing.T) {
+	f := newFixture(t)
+	f.write("proc/uptime", "100 0\n")
+	f.whyProc(7, 1, "Isolated Web Co", 0, 100, map[string]uint64{"Isolated Web Co": 100})
+	src := Source{Root: f.root}
+	if got := src.findProcs("web"); len(got) != 1 || got[0] != 7 {
+		t.Fatalf("part of the name: %v", got)
+	}
+	if got := src.findProcs("7"); len(got) != 1 {
+		t.Fatalf("pid: %v", got)
+	}
+	if got := src.findProcs("nothing-here"); len(got) != 0 {
+		t.Fatalf("no match: %v", got)
+	}
+}

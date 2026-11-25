@@ -90,6 +90,26 @@ one), warns when the machine sleeps in `s2idle` although `deep` is available, an
 history on battery with the percent lost per hour. A laptop that is really off drains almost nothing, so
 a high rate means it was asleep and something kept it busy. Needs the history recorder.
 
+### Look closely at one program
+
+```
+$ kerna why qs
+kerna  why qs · Quickshell, your desktop shell
+  1 process (pid 47962), running for 31 min, 110 threads, RAM 1.1 GiB
+  CPU   3% now   ·   33% average over its whole life
+  Busiest threads
+    QSGRenderThread          14%
+  › Its average over its whole life is 33%, much higher than the 3% right now: it was busier
+    earlier, so judge the current number.
+```
+
+It shows how long a program has run, what it uses now compared with its whole life (a number like
+`ps` shows is the lifetime average, which can be far from the truth right now), which of its threads
+do the work, its GPU time, its wake-ups and the child programs it started, then says in plain words
+what the numbers show. When most of the work is in a rendering thread it says the program keeps
+redrawing the screen: that is how a desktop shell's always-on audio visualizer showed up on the
+laptop kerna was built on (CPU from 50% to 3% after turning it off).
+
 ### Why did it freeze?
 
 ```

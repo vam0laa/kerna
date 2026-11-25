@@ -50,9 +50,9 @@ var (
 func human(b float64) string {
 	switch {
 	case b >= 1<<30:
-		return fmt.Sprintf("%.1f GiB/s", b/(1<<30))
+		return fl(b/(1<<30), 1) + " GiB/s"
 	case b >= 1<<20:
-		return fmt.Sprintf("%.1f MiB/s", b/(1<<20))
+		return fl(b/(1<<20), 1) + " MiB/s"
 	case b >= 1<<10:
 		return fmt.Sprintf("%.0f KiB/s", b/(1<<10))
 	}
@@ -61,7 +61,7 @@ func human(b float64) string {
 
 func mib(kib int64) string {
 	if kib >= 1<<20 {
-		return fmt.Sprintf("%.1f GiB", float64(kib)/(1<<20))
+		return fl(float64(kib)/(1<<20), 1) + " GiB"
 	}
 	return fmt.Sprintf("%d MiB", kib/1024)
 }
@@ -361,6 +361,9 @@ func Diagnose(r Report) []Finding {
 			f.Evidence = append(f.Evidence, L("the discrete GPU is awake (see above)", "ayrık ekran kartı uyanık (yukarıya bak)"))
 		}
 		f.Evidence = append(f.Evidence, L("ranked by CPU work and wake-ups: the kernel does not report watts per program without root", "CPU işi ve uyanma sayısına göre sıralı: çekirdek root olmadan program başına watt vermez"))
+		if g := r.GroupCPU(1); len(g) > 0 && g[0].CPU >= 3 {
+			f.Evidence = append(f.Evidence, L("look closer at the first one: kerna why \""+g[0].Comm+"\"", "ilkine yakından bak: kerna why \""+g[0].Comm+"\""))
+		}
 		f.Hint = "powerprofilesctl set power-saver"
 		out = append(out, f)
 	}

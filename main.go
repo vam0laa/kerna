@@ -26,6 +26,7 @@ func usage() {
   kerna history --at 03:12 what was going on at that moment
   kerna history --today    a summary of today: battery, busiest programs, problems
   kerna sleep              suspend problems and battery drain while asleep
+  kerna why <name|pid>     look closely at one program: now vs its whole life, threads, GPU, children
   kerna service install    record history in the background (a systemd user service)
   kerna service uninstall  stop recording
   kerna why-froze          why did the last session end badly? (reads the system log with journalctl)
@@ -49,6 +50,7 @@ History stays in ~/.local/state/kerna on this machine and is deleted after 7 day
   kerna history --at 03:12 o anda neler oluyordu
   kerna history --today    bugünün özeti: pil, en yoğun programlar, sorunlar
   kerna sleep              uyku sorunları ve uykudayken pil tüketimi
+  kerna why <ad|pid>       tek bir programa yakından bak: şimdi ve tüm ömrü, iş parçacıkları, GPU, alt programlar
   kerna service install    geçmişi arka planda kaydet (bir systemd kullanıcı servisi)
   kerna service uninstall  kaydı durdur
   kerna why-froze          son oturum neden kötü bitti? (sistem günlüğünü journalctl ile okur)
@@ -83,7 +85,16 @@ func main() {
 	since := fs.Duration("since", 24*time.Hour, "history: how far back to look")
 	at := fs.String("at", "", "history: show one moment, e.g. 03:12")
 	today := fs.Bool("today", false, "history: a summary of today")
-	fs.Parse(args)
+	// flags may come before or after the positional words: kerna why qs -n 3
+	var pos []string
+	for {
+		fs.Parse(args)
+		if fs.NArg() == 0 {
+			break
+		}
+		pos = append(pos, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
 
 	src := Source{Root: "/"}
 	if r := os.Getenv("KERNA_ROOT"); r != "" {
@@ -98,13 +109,13 @@ func main() {
 	cfg := LoadConfig()
 	switch cmd {
 	case "ignore", "unignore", "notify":
-		configCmd(cmd, fs.Args())
+		configCmd(cmd, pos)
 	case "why-froze":
 		whyFroze(pal)
 	case "snapshot":
 		name := "last"
-		if fs.NArg() > 0 {
-			name = fs.Arg(0)
+		if len(pos) > 0 {
+			name = pos[0]
 		}
 		rep := src.Sample(win)
 		kept, _ := cfg.Filter(Diagnose(rep))
@@ -115,8 +126,8 @@ func main() {
 		fmt.Println(L("Saved. Change something, then run: kerna compare "+name, "Kaydedildi. Bir şeyi değiştir, sonra çalıştır: kerna compare "+name))
 	case "compare":
 		name := "last"
-		if fs.NArg() > 0 {
-			name = fs.Arg(0)
+		if len(pos) > 0 {
+			name = pos[0]
 		}
 		before, err := LoadSnap(name)
 		if err != nil {
@@ -149,6 +160,19 @@ func main() {
 			return
 		}
 		showHistory(pal, *since, *at)
+	case "why":
+		if len(pos) != 1 {
+			usage()
+			os.Exit(2)
+		}
+		w, ok := src.Why(pos[0], win)
+		if !ok {
+			fmt.Fprintln(os.Stderr, L("kerna: no running program matches \""+pos[0]+"\"", "kerna: \""+pos[0]+"\" ile eşleşen çalışan program yok"))
+			os.Exit(1)
+		}
+		for _, l := range WhyLines(pal, w) {
+			fmt.Println(l)
+		}
 	case "sleep":
 		es, _ := readHistory(historyPath(), time.Now().Add(-keepFor))
 		for _, l := range SleepLines(pal, src.readSleep(), es) {
