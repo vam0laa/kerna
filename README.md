@@ -49,7 +49,7 @@ kerna service uninstall    # stop recording
 ```
 
 `kerna watch` keys: `q` quit, `p` pause, `j`/`k` (or Tab) select a finding, `c` copy its command to the
-clipboard (`wl-copy`, `xclip` or `xsel`), `i` mute it, `t` list the busiest programs (CPU, wake-ups,
+clipboard (`wl-copy`, `xclip` or `xsel`), `i` mute it, `t` list the busiest programs (CPU, GPU, wake-ups,
 RAM), `h` history of the last 24 hours, `d` today's summary.
 
 `kerna watch` is one calm screen on purpose: a verdict on top, six live lines (a short graph and the
@@ -158,6 +158,7 @@ nobody waits for is not reported.
 | Memory is running out | memory stall, little available RAM, or heavy swap traffic; the biggest programs |
 | The CPU is slowing itself down | 88 °C or more, clocks under 70% of maximum, CPU busy |
 | A discrete GPU is awake (hybrid laptops) | runtime power state, `power/control`, and for NVIDIA who has `/dev/nvidia*` open |
+| A GPU is working hard, or draws 8 W or more | 50% busy or 8 W (amdgpu); the programs behind it, from the kernel's DRM fdinfo, so the answer is "Hyprland 25%, Firefox 17%, video decoder 16%" |
 | A GPU is almost fully busy | 95% or more: `gpu_busy_percent` (amdgpu), or derived from idle residency (Intel i915 and xe) |
 | Network connections are losing packets | 3% or more of the TCP segments sent had to be sent again (`/proc/net/snmp`), at least 300 segments |
 | The Wi-Fi signal is weak | -75 dBm or worse, when the driver fills `/proc/net/wireless` |
@@ -191,6 +192,9 @@ PipeWire, ...).
 - The discrete-GPU finding works for any vendor, but only the NVIDIA case (the laptop it was
   built on) was seen on real hardware. The AMD and Intel paths are tested against fake sysfs data.
   Intel GPU busy is derived from idle residency, and amdgpu is the only driver that reports GPU watts.
+- GPU time per program comes from the kernel's DRM fdinfo (amdgpu, i915, xe and others publish it). It is
+  readable for your own processes only, and NVIDIA's proprietary driver does not publish it, so on an
+  NVIDIA GPU the list of GPU users stays empty. It was seen on real hardware with amdgpu only.
 - Without root the kernel gives no watts per program (the power counters need root). The battery
   finding therefore ranks suspects by CPU work and wake-ups, and says so; it never invents watts.
 - `why-froze` needs a journal your user may read (group `wheel`, `adm` or `systemd-journal`) and can

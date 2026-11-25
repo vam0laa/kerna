@@ -47,6 +47,7 @@ type Entry struct {
 	Bat      int        `json:"b,omitempty"`    // battery percent
 	Plugged  bool       `json:"pl,omitempty"`   // charging or full
 	Top      []HTop     `json:"top,omitempty"`  // the busiest programs: name and percent of one core
+	GTop     []HTop     `json:"gtop,omitempty"` // the programs that used the GPU most: name and percent of the GPU
 	Findings []HFinding `json:"f,omitempty"`
 }
 
@@ -56,6 +57,7 @@ var titles = map[string][2]string{
 	"memory-pressure":  {"Memory was running out", "Bellek tükeniyordu"},
 	"thermal-throttle": {"The CPU slowed down because it was hot", "İşlemci ısındığı için yavaşladı"},
 	"dgpu-awake":       {"A discrete GPU was awake", "Ayrık ekran kartı uyanıktı"},
+	"gpu-load":         {"The GPU was working hard", "Ekran kartı yoğun çalışıyordu"},
 	"gpu-busy":         {"A GPU was almost fully busy", "Bir ekran kartı neredeyse tamamen meşguldü"},
 	"battery-drain":    {"The battery was draining fast", "Pil hızlı tükeniyordu"},
 	"net-loss":         {"Network connections were losing packets", "Ağ bağlantıları paket kaybediyordu"},
@@ -97,6 +99,11 @@ func entryOf(r Report, fs []Finding, now time.Time) Entry {
 	for _, g := range r.GroupCPU(3) {
 		if g.CPU >= 1 {
 			e.Top = append(e.Top, HTop{N: g.Comm, C: round1(g.CPU)})
+		}
+	}
+	for _, g := range r.TopGPU(3) {
+		if g.GPU >= 3 {
+			e.GTop = append(e.GTop, HTop{N: g.Comm, C: round1(g.GPU)})
 		}
 	}
 	for _, f := range fs {

@@ -395,13 +395,22 @@ func FrameOpts(p palette, r Report, fs []Finding, h *Hist, width int, host strin
 	}
 	if g := gpuLine(r.Static); g != "" {
 		out = append(out, "  "+p.c(cDim, pad(L("Graphics", "Grafik"), labelW))+p.c(cText, g))
+		var users []string
+		for _, u := range r.TopGPU(3) {
+			if u.GPU >= 3 {
+				users = append(users, fmt.Sprintf("%s %s%%", u.Comm, fl(u.GPU, 0)))
+			}
+		}
+		if len(users) > 0 {
+			out = append(out, "  "+p.c(cDim, pad(L("GPU users", "GPU kullanan"), labelW))+strings.Join(users, p.c(cDim, "  ·  ")))
+		}
 	}
 	out = append(out, "")
 	if o.Top {
 		out = append(out, rule(p, L("Programs", "Programlar"), width), "")
-		out = append(out, p.c(cDim, fmt.Sprintf("  %-40s %8s %10s %9s", "", "CPU", L("wake-ups/s", "uyanma/sn"), "RAM")))
+		out = append(out, p.c(cDim, fmt.Sprintf("  %-40s %8s %8s %10s %9s", "", "CPU", "GPU", L("wake-ups/s", "uyanma/sn"), "RAM")))
 		for _, g := range r.GroupCPU(8) {
-			if g.CPU < 0.5 && g.Wakeups < 20 {
+			if g.CPU < 0.5 && g.Wakeups < 20 && g.GPU < 1 {
 				continue
 			}
 			name := g.Comm
@@ -411,7 +420,7 @@ func FrameOpts(p palette, r Report, fs []Finding, h *Hist, width int, host strin
 			if d := describe(g.Comm); d != "" {
 				name += p.c(cDim, " · "+d)
 			}
-			out = append(out, "  "+pad(clip(name, 40), 40)+fmt.Sprintf(" %7s%% %10s %9s", fl(g.CPU, 0), fl(g.Wakeups, 0), mib(g.RSSKiB)))
+			out = append(out, "  "+pad(clip(name, 40), 40)+fmt.Sprintf(" %7s%% %7s%% %10s %9s", fl(g.CPU, 0), fl(g.GPU, 0), fl(g.Wakeups, 0), mib(g.RSSKiB)))
 		}
 		out = append(out, "")
 	}

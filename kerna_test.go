@@ -825,3 +825,101 @@ func TestSleepStatsFromSysfs(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 }
+
+const fdinfoAMD = `pos:	0
+flags:	02000002
+drm-driver:	amdgpu
+drm-pdev:	0000:65:00.0
+drm-client-id:	%d
+drm-engine-gfx:	%d ns
+drm-engine-compute:	0 ns
+drm-engine-dec:	%d ns
+drm-engine-capacity-gfx:	1
+drm-memory-vram:	100 KiB
+`
+
+func (f *fixture) gpuProc(pid int, comm string, client int, gfxNs, decNs uint64) {
+	f.proc(pid, comm, 0, 100, 0, 0)
+	dir := filepath.Join(f.root, fmt.Sprintf("proc/%d/fd", pid))
+	os.MkdirAll(dir, 0o755)
+	os.Remove(filepath.Join(dir, "7"))
+	os.Symlink("/dev/dri/renderD128", filepath.Join(dir, "7"))
+	os.Remove(filepath.Join(dir, "8")) // the same client through a duplicated descriptor
+	os.Symlink("/dev/dri/renderD128", filepath.Join(dir, "8"))
+	f.write(fmt.Sprintf("proc/%d/fdinfo/7", pid), fmt.Sprintf(fdinfoAMD, client, gfxNs, decNs))
+	f.write(fmt.Sprintf("proc/%d/fdinfo/8", pid), fmt.Sprintf(fdinfoAMD, client, gfxNs, decNs))
+}
+
+func TestParseDRMFdinfo(t *testing.T) {
+	id, ns, ok := parseDRMFdinfo(fmt.Sprintf(fdinfoAMD, 42, 3000, 500))
+	if !ok || id != "42" || ns != 3500 {
+		t.Fatalf("id=%q ns=%d ok=%v (capacity lines and memory must not count)", id, ns, ok)
+	}
+	if _, _, ok := parseDRMFdinfo("pos: 0\nflags: 02\n"); ok {
+		t.Fatal("a file without drm-driver is not DRM")
+	}
+}
+
+func TestGPUTimePerProgram(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	f.write("sys/class/drm/card0/dev", "226:0")
+	f.write("sys/bus/pci/devices/0000:65:00.0/class", "0x030000")
+	f.write("sys/bus/pci/devices/0000:65:00.0/vendor", "0x1002")
+	f.write("sys/bus/pci/devices/0000:65:00.0/boot_vga", "1")
+	f.write("sys/bus/pci/devices/0000:65:00.0/gpu_busy_percent", "69")
+	f.write("sys/bus/pci/devices/0000:65:00.0/hwmon/hwmon5/power1_average", "14000000")
+	f.write("sys/class/power_supply/BAT1/status", "Discharging")
+	f.write("sys/class/power_supply/BAT1/capacity", "50")
+	f.write("sys/class/power_supply/BAT1/power_now", "30000000")
+	f.write("sys/class/power_supply/BAT1/energy_now", "40000000")
+	f.gpuProc(1, "Hyprland", 1, 0, 0)
+	f.gpuProc(2, "firefox", 2, 0, 0)
+	f.gpuProc(3, "quiet", 3, 0, 0)
+	got := f.diagnose(func() {
+		f.gpuProc(1, "Hyprland", 1, 250_000_000, 0)         // 25% of a 1 s window
+		f.gpuProc(2, "firefox", 2, 100_000_000, 60_000_000) // 16%: the duplicated descriptor must count once
+		f.gpuProc(3, "quiet", 3, 1_000_000, 0)
+	})
+	var load *Finding
+	for i := range got {
+		if got[i].ID == "gpu-load" {
+			load = &got[i]
+		}
+	}
+	if load == nil || load.Sev != Warn || !strings.Contains(load.Title, "AMD GPU draws 14 W (69% busy)") {
+		t.Fatalf("got %s %+v", ids(got), got)
+	}
+	ev := strings.Join(load.Evidence, "\n")
+	if !strings.Contains(ev, "Hyprland (pid 1) · your window manager: 25% of the GPU") || !strings.Contains(ev, "firefox (pid 2): 16% of the GPU") || strings.Contains(ev, "quiet") {
+		t.Fatalf("evidence:\n%s", ev)
+	}
+	if !strings.Contains(ev, "only root can see") {
+		t.Fatalf("41%% visible of 69%% busy must mention the invisible rest:\n%s", ev)
+	}
+}
+
+func TestIdleGPUHasNoLoadFinding(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	f.write("sys/class/drm/card0/dev", "226:0")
+	f.write("sys/bus/pci/devices/0000:65:00.0/class", "0x030000")
+	f.write("sys/bus/pci/devices/0000:65:00.0/vendor", "0x1002")
+	f.write("sys/bus/pci/devices/0000:65:00.0/boot_vga", "1")
+	f.write("sys/bus/pci/devices/0000:65:00.0/gpu_busy_percent", "10")
+	f.gpuProc(1, "Hyprland", 1, 0, 0)
+	if got := f.diagnose(func() { f.gpuProc(1, "Hyprland", 1, 300_000_000, 0) }); len(got) != 0 {
+		t.Fatalf("a quiet GPU must stay quiet, got %s", ids(got))
+	}
+}
+
+func TestFrameShowsGPUUsersAndColumn(t *testing.T) {
+	r := Report{Window: time.Second, PSI: map[string]PSI{}, Static: Static{MemTotalKiB: 100, MemAvailKiB: 50, GPUs: []GPU{{Vendor: "amd", Runtime: "active", BusyPct: 60, Watts: 12}}},
+		Procs: []Rate{{PID: 1, Comm: "Hyprland", CPU: 10, GPU: 25}, {PID: 2, Comm: "firefox", CPU: 20, GPU: 17}}}
+	out := strings.Join(FrameOpts(palette{false}, r, nil, &Hist{}, 96, "h", time.Now(), "", true, Opts{Sel: -1, Top: true}), "\n")
+	for _, want := range []string{"GPU users", "Hyprland 25%", "firefox 17%", "GPU", "25%"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}

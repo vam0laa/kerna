@@ -48,6 +48,7 @@ type Proc struct {
 	WriteB   uint64
 	HasIO    bool   // /proc/PID/io is readable (own processes only without root)
 	HoldsGPU bool   // has an NVIDIA device file open (own processes only)
+	GPUNs    uint64 // GPU time used so far, all engines, from the kernel's DRM fdinfo (own processes only)
 	Wakeups  uint64 // voluntary context switches: how often it went to sleep and was woken again
 }
 
@@ -188,8 +189,9 @@ func (s Source) readRaw() Raw {
 		}
 		f.Close()
 	}
-	_, nvErr := os.Stat(s.p("proc/driver/nvidia")) // only scan open files when an NVIDIA driver exists
-	scanFD := nvErr == nil
+	_, nvErr := os.Stat(s.p("proc/driver/nvidia")) // only scan open files when a GPU driver exists
+	drm, _ := filepath.Glob(s.p("sys/class/drm/card[0-9]*"))
+	scanFD := nvErr == nil || len(drm) > 0
 	entries, _ := os.ReadDir(s.p("proc"))
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
@@ -230,10 +232,22 @@ func (s Source) readRaw() Raw {
 			continue
 		}
 		if fds, err := os.ReadDir(s.p("proc", e.Name(), "fd")); err == nil {
+			seen := map[string]bool{} // a duplicated descriptor is the same DRM client: count it once
 			for _, fd := range fds {
-				if dst, err := os.Readlink(s.p("proc", e.Name(), "fd", fd.Name())); err == nil && strings.HasPrefix(dst, "/dev/nvidia") {
+				dst, err := os.Readlink(s.p("proc", e.Name(), "fd", fd.Name()))
+				if err != nil {
+					continue
+				}
+				switch {
+				case strings.HasPrefix(dst, "/dev/nvidia"):
 					pr.HoldsGPU = true
-					break
+				case strings.HasPrefix(dst, "/dev/dri/"):
+					if txt, ok := s.read("proc", e.Name(), "fdinfo", fd.Name()); ok {
+						if id, ns, ok := parseDRMFdinfo(txt); ok && !seen[id] {
+							seen[id] = true
+							pr.GPUNs += ns
+						}
+					}
 				}
 			}
 		}
@@ -431,6 +445,7 @@ type Rate struct {
 	HoldsGPU bool
 	HasIO    bool
 	Wakeups  float64 // per second
+	GPU      float64 // percent of the window the program kept GPU engines busy (can pass 100 with several engines)
 }
 
 // Report is what the rules look at.
@@ -464,6 +479,15 @@ func (r Report) TopCPU(n int) []Rate {
 func (r Report) TopIO(n int) []Rate {
 	return r.top(n, func(a, b Rate) bool { return a.ReadBps+a.WriteBps > b.ReadBps+b.WriteBps })
 }
+func (r Report) TopGPU(n int) []Group {
+	gs := r.GroupCPU(len(r.Procs) + 1)
+	sort.Slice(gs, func(i, j int) bool { return gs[i].GPU > gs[j].GPU })
+	if len(gs) > n {
+		gs = gs[:n]
+	}
+	return gs
+}
+
 func (r Report) TopMem(n int) []Rate {
 	return r.top(n, func(a, b Rate) bool { return a.RSSKiB > b.RSSKiB })
 }
@@ -516,6 +540,9 @@ func Diff(a, b Raw, st Static) Report {
 			continue
 		}
 		r := Rate{PID: pid, Comm: pb.Comm, RSSKiB: pb.RSSKiB, HoldsGPU: pb.HoldsGPU, HasIO: pb.HasIO}
+		if pb.GPUNs >= pa.GPUNs {
+			r.GPU = float64(pb.GPUNs-pa.GPUNs) / (sec * 1e9) * 100
+		}
 		if pb.Ticks >= pa.Ticks {
 			r.CPU = float64(pb.Ticks-pa.Ticks) / clkTck / sec * 100
 		}
@@ -552,6 +579,7 @@ type Group struct {
 	PID     int // the busiest member
 	Wakeups float64
 	RSSKiB  int64
+	GPU     float64
 	maxCPU  float64
 }
 
@@ -567,6 +595,7 @@ func (r Report) GroupCPU(n int) []Group {
 		g.CPU += p.CPU
 		g.Wakeups += p.Wakeups
 		g.RSSKiB += p.RSSKiB
+		g.GPU += p.GPU
 		if p.CPU >= g.maxCPU {
 			g.maxCPU, g.PID = p.CPU, p.PID
 		}
@@ -580,4 +609,29 @@ func (r Report) GroupCPU(n int) []Group {
 		out = out[:n]
 	}
 	return out
+}
+
+// parseDRMFdinfo reads the standard DRM fdinfo of a render or card file:
+// the client id and the GPU time of all engines in nanoseconds. Drivers such as amdgpu,
+// i915 and xe publish it; it is readable for your own processes.
+func parseDRMFdinfo(text string) (clientID string, ns uint64, ok bool) {
+	for _, line := range strings.Split(text, "\n") {
+		k, v, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		switch {
+		case k == "drm-driver":
+			ok = true
+		case k == "drm-client-id":
+			clientID = v
+		case strings.HasPrefix(k, "drm-engine-") && !strings.HasPrefix(k, "drm-engine-capacity-"):
+			if num, unit, _ := strings.Cut(v, " "); unit == "ns" {
+				n, _ := strconv.ParseUint(num, 10, 64)
+				ns += n
+			}
+		}
+	}
+	return clientID, ns, ok && clientID != ""
 }

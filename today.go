@@ -109,6 +109,29 @@ func TodayLines(p palette, es []Entry, now time.Time) []string {
 		out = append(out, "")
 	}
 
+	// GPU users
+	gsum := map[string]float64{}
+	for _, e := range day {
+		for _, t := range e.GTop {
+			gsum[t.N] += t.C
+		}
+	}
+	var gtops []kv
+	for n, v := range gsum {
+		gtops = append(gtops, kv{n, v / float64(len(day))})
+	}
+	sort.Slice(gtops, func(i, j int) bool { return gtops[i].v > gtops[j].v })
+	if len(gtops) > 0 {
+		out = append(out, "  "+p.c(cBold, L("GPU users", "GPU kullananlar"))+p.c(cDim, "  "+L("(average, in percent of the GPU)", "(ortalama, GPU'nun yüzdesi)")))
+		for i, t := range gtops {
+			if i == 4 {
+				break
+			}
+			out = append(out, fmt.Sprintf("    %-24s %s%%", describeShort(t.n), fl(t.v, 0)))
+		}
+		out = append(out, "")
+	}
+
 	// problems
 	ins := Incidents(day)
 	if len(ins) == 0 {

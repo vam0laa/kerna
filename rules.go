@@ -93,6 +93,24 @@ func gpuName(v string) string {
 	return "GPU " + v
 }
 
+// gpuUsers lists the programs that kept the GPU busy, biggest first, and says
+// when part of the load comes from programs we cannot see (other users, root).
+func gpuUsers(r Report, busy int) []string {
+	var out []string
+	var seen float64
+	for _, g := range r.TopGPU(4) {
+		if g.GPU < 3 {
+			continue
+		}
+		seen += g.GPU
+		out = append(out, L(fmt.Sprintf("%s: %s%% of the GPU", label(g.Comm, g.PID, g.Count), fl(g.GPU, 0)), fmt.Sprintf("%s: GPU'nun %%%s'i", label(g.Comm, g.PID, g.Count), fl(g.GPU, 0))))
+	}
+	if len(out) > 0 && busy > 0 && seen < float64(busy)*0.6 {
+		out = append(out, L("the rest comes from programs only root can see", "geri kalanı yalnızca root'un görebildiği programlardan geliyor"))
+	}
+	return out
+}
+
 func sevOf(v float64) Severity {
 	if v >= psiBad {
 		return Bad
@@ -288,8 +306,33 @@ func Diagnose(r Report) []Finding {
 				Title: L(fmt.Sprintf("The %s GPU is %d%% busy", gpuName(g.Vendor), g.BusyPct), fmt.Sprintf("%s ekran kartı %%%d meşgul", gpuName(g.Vendor), g.BusyPct)),
 				Why: L("A game, video or heavy window is using almost all of the GPU. That is normal while it runs, and it is why the fans and the battery work harder.",
 					"Bir oyun, video ya da ağır bir pencere ekran kartının neredeyse tamamını kullanıyor. Çalışırken normal, fanların ve pilin daha çok yorulmasının sebebi de bu."),
-				Hint: hint("nvtop", "shows which program is using each GPU (nvtop package)", "hangi programın hangi ekran kartını kullandığını gösterir (nvtop paketi)")})
+				Evidence: gpuUsers(r, g.BusyPct),
+				Hint:     hint("nvtop", "shows which program is using each GPU (nvtop package)", "hangi programın hangi ekran kartını kullandığını gösterir (nvtop paketi)")})
 		}
+	}
+
+	// 5c. A GPU that works hard without being full: on battery this is often the biggest single draw.
+	for _, g := range st.GPUs {
+		if g.BusyPct >= 95 || (g.BusyPct < 50 && g.Watts < 8) {
+			continue
+		}
+		users := gpuUsers(r, g.BusyPct)
+		if len(users) == 0 {
+			continue
+		}
+		sev := Info
+		if onBattery && g.Watts >= 8 {
+			sev = Warn
+		}
+		title := L(fmt.Sprintf("The %s GPU is working hard: %d%% busy", gpuName(g.Vendor), g.BusyPct), fmt.Sprintf("%s ekran kartı yoğun çalışıyor: %%%d meşgul", gpuName(g.Vendor), g.BusyPct))
+		if g.Watts >= 8 {
+			title = L(fmt.Sprintf("The %s GPU draws %s W (%d%% busy)", gpuName(g.Vendor), fl(g.Watts, 0), g.BusyPct), fmt.Sprintf("%s ekran kartı %s W çekiyor (%%%d meşgul)", gpuName(g.Vendor), fl(g.Watts, 0), g.BusyPct))
+		}
+		out = append(out, Finding{ID: "gpu-load", Sev: sev, Title: title,
+			Why: L("Heavy GPU work raises heat and battery drain, and the screen compositor and video playback are usual causes. These programs used it in the last seconds:",
+				"Yoğun GPU işi ısıyı ve pil tüketimini artırır; ekranı birleştiren yazılım ve video oynatma bunun olağan sebepleridir. Son saniyelerde şu programlar kullandı:"),
+			Evidence: users,
+			Hint:     hint("nvtop", "live GPU use per program (nvtop package)", "program başına canlı GPU kullanımı (nvtop paketi)")})
 	}
 
 	// 6. Battery drains fast. The kernel does not tell us watts per program without root,
