@@ -1,3 +1,3 @@
-module github.com/vam0laa/cause
+module github.com/vam0laa/kerna
 
 go 1.22

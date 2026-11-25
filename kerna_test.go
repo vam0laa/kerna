@@ -199,11 +199,75 @@ func TestProcessThatRestartedIsIgnored(t *testing.T) {
 	}
 }
 
-func TestRenderIsPlainWithoutColor(t *testing.T) {
-	var sb strings.Builder
-	Render(&sb, palette{false}, Report{Window: 2 * time.Second, PSI: map[string]PSI{}}, nil)
-	if strings.Contains(sb.String(), "\x1b[") || !strings.Contains(sb.String(), "Nothing is wrong") {
-		t.Fatalf("output = %q", sb.String())
+func TestFrameIsPlainWithoutColor(t *testing.T) {
+	r := Report{Window: 2 * time.Second, PSI: map[string]PSI{}, Static: Static{MemTotalKiB: 100, MemAvailKiB: 50}}
+	out := strings.Join(Frame(palette{false}, r, nil, &Hist{}, 80, "host", time.Now(), "", false), "\n")
+	if strings.Contains(out, "\x1b[") || !strings.Contains(out, "Everything looks fine") {
+		t.Fatalf("output = %q", out)
+	}
+}
+
+func TestFrameShowsFindingAndHint(t *testing.T) {
+	r := Report{Window: 2 * time.Second, PSI: map[string]PSI{"cpu": {SomeAvg10: 50}}}
+	fs := []Finding{{ID: "cpu-pressure", Sev: Bad, Title: "Programs are waiting for the CPU", Why: "why", Evidence: []string{"x (pid 1) 90% of one core"}, Hint: "kill -STOP 1   # pause it"}}
+	out := strings.Join(Frame(palette{false}, r, fs, &Hist{}, 80, "h", time.Now(), "", true), "\n")
+	for _, want := range []string{"1 thing needs attention", "Programs are waiting for the CPU", "x (pid 1) 90% of one core", "$ kill -STOP 1", "pause it"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestIncidentsGroupAndSplit(t *testing.T) {
+	t0 := time.Date(2026, 11, 25, 3, 0, 0, 0, time.Local)
+	mk := func(min int, f bool, pc float64) Entry {
+		e := Entry{T: t0.Add(time.Duration(min) * recordEvery), PCPU: pc}
+		if f {
+			e.Findings = []HFinding{{ID: "cpu-pressure", Sev: Bad, Evidence: []string{"ffmpeg ×3 300% of one core"}}}
+		}
+		return e
+	}
+	es := []Entry{mk(0, false, 0), mk(1, true, 40), mk(2, true, 71), mk(3, false, 0), mk(10, true, 20)}
+	ins := Incidents(es)
+	if len(ins) != 2 {
+		t.Fatalf("incidents = %+v", ins)
+	}
+	if ins[0].Samples != 2 || !strings.Contains(ins[0].Peak, "71%") || !strings.Contains(ins[0].Evidence, "ffmpeg") {
+		t.Fatalf("first = %+v", ins[0])
+	}
+}
+
+func TestHistoryRoundTripAndPrune(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+	now := time.Now()
+	for _, e := range []Entry{{T: now.Add(-10 * 24 * time.Hour), CPU: 1}, {T: now.Add(-time.Hour), CPU: 2, Findings: []HFinding{{ID: "io-pressure", Sev: Warn}}}} {
+		if err := appendEntry(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := prune(historyPath(), now); err != nil {
+		t.Fatal(err)
+	}
+	es, err := readHistory(historyPath(), now.Add(-24*time.Hour*30))
+	if err != nil || len(es) != 1 || es[0].CPU != 2 || es[0].Findings[0].ID != "io-pressure" {
+		t.Fatalf("es=%+v err=%v", es, err)
+	}
+	if fi, _ := os.Stat(historyPath()); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("history must be private, mode = %v", fi.Mode())
+	}
+}
+
+func TestParseAt(t *testing.T) {
+	now := time.Date(2026, 11, 25, 14, 0, 0, 0, time.Local)
+	if got, _ := parseAt("03:12", now); got.Day() != 25 || got.Hour() != 3 {
+		t.Fatalf("got %v", got)
+	}
+	if got, _ := parseAt("23:30", now); got.Day() != 24 {
+		t.Fatalf("a time still in the future means yesterday, got %v", got)
+	}
+	if _, err := parseAt("soon", now); err == nil {
+		t.Fatal("expected an error")
 	}
 }
 
@@ -233,5 +297,40 @@ func TestNeverSuggestsPausingTheDesktop(t *testing.T) {
 	got := f.diagnose(func() { f.proc(7, "Hyprland", 100, 100, 0, 0) })
 	if len(got) != 1 || strings.Contains(got[0].Hint, "kill") || !strings.Contains(got[0].Hint, "do not pause") {
 		t.Fatalf("hint = %q", got[0].Hint)
+	}
+}
+
+func TestAMDDiscreteGPUAwakeAndBusy(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	// integrated Intel drives the screen, a discrete AMD card is awake and busy
+	f.write("sys/bus/pci/devices/0000:00:02.0/class", "0x030000")
+	f.write("sys/bus/pci/devices/0000:00:02.0/vendor", "0x8086")
+	f.write("sys/bus/pci/devices/0000:00:02.0/boot_vga", "1")
+	f.write("sys/bus/pci/devices/0000:03:00.0/class", "0x030000")
+	f.write("sys/bus/pci/devices/0000:03:00.0/vendor", "0x1002")
+	f.write("sys/bus/pci/devices/0000:03:00.0/power/runtime_status", "active")
+	f.write("sys/bus/pci/devices/0000:03:00.0/power/control", "auto")
+	f.write("sys/bus/pci/devices/0000:03:00.0/gpu_busy_percent", "98")
+	f.proc(60, "idle", 0, 100, 0, 0)
+	got := f.diagnose(func() { f.proc(60, "idle", 1, 100, 0, 0) })
+	if ids(got) != "dgpu-awake,gpu-busy" && ids(got) != "gpu-busy,dgpu-awake" {
+		t.Fatalf("got %s", ids(got))
+	}
+	if !strings.Contains(got[0].Title+got[1].Title, "AMD GPU is awake") || !strings.Contains(got[0].Title+got[1].Title, "AMD GPU is 98% busy") {
+		t.Fatalf("titles = %q / %q", got[0].Title, got[1].Title)
+	}
+}
+
+func TestSingleIntegratedGPUIsNeverReported(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	f.write("sys/bus/pci/devices/0000:00:02.0/class", "0x030000")
+	f.write("sys/bus/pci/devices/0000:00:02.0/vendor", "0x8086")
+	f.write("sys/bus/pci/devices/0000:00:02.0/boot_vga", "1")
+	f.write("sys/bus/pci/devices/0000:00:02.0/power/runtime_status", "active")
+	f.proc(60, "idle", 0, 100, 0, 0)
+	if got := f.diagnose(func() { f.proc(60, "idle", 1, 100, 0, 0) }); len(got) != 0 {
+		t.Fatalf("got %s", ids(got))
 	}
 }

@@ -1,12 +1,12 @@
-# cause
+# kerna
 
 **Why is my Linux system slow, hot or draining the battery?** Tools like btop, glances and fastfetch
-show you numbers. `cause` reads the same kernel data and tells you the *reason*, names the program
+show you numbers. `kerna` reads the same kernel data and tells you the *reason*, names the program
 behind it, and suggests what to try. In English or Türkçe.
 
 ```
-$ cause
-cause  why is my system like this
+$ kerna
+kerna  why is my system like this
 
   CPU 100%   load 13.6/16   RAM 47% free   swap 0 MiB used
   stalled: cpu 71%  disk 0%  memory 0%   92 °C
@@ -27,16 +27,48 @@ cause  why is my system like this
 
 When nothing is wrong it says so in one line instead of showing you a wall of graphs.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vam0laa/kerna/main/install.sh | sh
+```
+
+No root needed: it installs to `~/.local/bin`, after checking the SHA-256 of the download. Or grab
+a tarball from the [releases](https://github.com/vam0laa/kerna/releases/latest), or `make build`.
+
 ## Use
 
 ```bash
-cause              # sample for 2 seconds and explain what is wrong
-cause watch        # live view, refreshed continuously (Ctrl-C to quit)
-cause --json       # the same diagnosis as JSON, for scripts and status bars
-cause -n 5         # sample for 5 seconds instead of 2
+kerna                      # sample for 2 seconds and explain what is wrong
+kerna watch                # live view: q quit, p pause, h history
+kerna --json               # the same diagnosis as JSON, for scripts and status bars
+kerna history              # problems in the last 24 hours (--since 3d for longer)
+kerna history --at 03:12   # what was going on at that moment
+kerna service install      # record history in the background (a systemd user service)
+kerna service uninstall    # stop recording
 ```
 
-Language follows `LANG`; force it with `CAUSE_LANG=tr` or `CAUSE_LANG=en`.
+`kerna watch` is one calm screen on purpose: a verdict on top, six live lines (a short graph and the
+number), and below them only what is wrong. No process tables, no tabs, no mouse.
+
+### History: "what happened at 03:12?"
+
+`kerna service install` starts a small background service that writes one line every 15 seconds to
+`~/.local/state/kerna/history.jsonl` (private to your user, deleted after 7 days). Then:
+
+```
+$ kerna history
+  Last 24 hours, 2 problems:
+
+  Wed 25 Nov
+    03:12–03:19 ● Programs were waiting for the CPU  peak stall 71%
+                   ffmpeg ×3 270% of one core
+    14:02–14:40 ● The battery was draining fast  21 W
+```
+
+Nothing is recorded until you install the service, and uninstalling it stops it at once.
+
+Language follows `LANG`; force it with `KERNA_LANG=tr` or `KERNA_LANG=en`.
 
 ## How it decides
 
@@ -51,10 +83,11 @@ nobody waits for is not reported.
 | Programs are waiting for the disk | disk stall at least 10%; per-process read and write rate |
 | Memory is running out | memory stall, little available RAM, or heavy swap traffic; the biggest programs |
 | The CPU is slowing itself down | 88 °C or more, clocks under 70% of maximum, CPU busy |
-| The NVIDIA GPU is awake (hybrid laptops) | runtime power state, `power/control`, who has `/dev/nvidia*` open |
+| A discrete GPU is awake (hybrid laptops) | runtime power state, `power/control`, and for NVIDIA who has `/dev/nvidia*` open |
+| A GPU is almost fully busy | `gpu_busy_percent` (amdgpu) of 95% or more |
 | The battery is draining fast | on battery, 15 W or more; with the top consumers and whether the dGPU is awake |
 
-Each finding has a title, the reason, the evidence and one command to try. `cause` never runs that
+Each finding has a title, the reason, the evidence and one command to try. `kerna` never runs that
 command itself, and it never suggests pausing parts of your desktop session (the compositor,
 PipeWire, ...).
 
@@ -62,7 +95,7 @@ PipeWire, ...).
 
 - Read-only: it reads `/proc` and `/sys`. No root needed, nothing is changed.
 - No network access at all, no telemetry, no files written.
-- Go standard library only, about 1,200 lines. Read it.
+- Go standard library only, under 2,000 lines (tests not counted). Read it.
 
 ## Limits (please read)
 
@@ -72,18 +105,19 @@ PipeWire, ...).
   "no process you own is the main source". Run it with `sudo` to see every user.
 - Thermal throttling is detected from temperature and clock speed together, not from a kernel
   flag, so it is an informed estimate.
-- GPU findings cover NVIDIA hybrid laptops. AMD and Intel GPUs are shown but not diagnosed.
-- It diagnoses the last few seconds, not the past. History ("what happened at 03:12?") is not
-  built yet.
+- The discrete-GPU finding works for any vendor, but only the NVIDIA case (the laptop it was
+  built on) was seen on real hardware. The AMD and Intel paths are tested against fake sysfs data.
+  GPU busy percent is only reported by the amdgpu driver.
+- History evidence is saved as text in the language of the recording service.
 
 ## Build
 
 ```bash
-make build        # ./cause
+make build        # ./kerna
 make test         # go vet + unit tests, which run against a fake /proc and /sys
 ```
 
-To diagnose a copy of another machine's `/proc` and `/sys`, point `CAUSE_ROOT` at it.
+To diagnose a copy of another machine's `/proc` and `/sys`, point `KERNA_ROOT` at it.
 
 ## License
 

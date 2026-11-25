@@ -1,4 +1,4 @@
-// cause tells you why your Linux system is slow, hot or draining its battery,
+// kerna tells you why your Linux system is slow, hot or draining its battery,
 // not just what the numbers are. It only reads /proc and /sys, needs no root,
 // changes nothing and sends nothing anywhere.
 package main
@@ -8,30 +8,40 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
+	"os/exec"
+	"path/filepath"
 	"time"
 )
 
 var version = "dev"
 
 func usage() {
-	fmt.Fprint(os.Stderr, L(`cause: why is my system slow, hot or draining the battery?
+	fmt.Fprint(os.Stderr, L(`kerna: why is my system slow, hot or draining the battery?
 
-  cause              sample for a few seconds and explain what is wrong
-  cause watch        live view, refreshed every few seconds (Ctrl-C to quit)
-  cause --json       the same diagnosis as JSON, for scripts and status bars
-  cause version
+  kerna                    sample for a moment and explain what is wrong
+  kerna watch              live view: q quit, p pause, h history
+  kerna --json             the same diagnosis as JSON, for scripts and status bars
+  kerna history            problems in the last 24 hours (--since 3d for longer)
+  kerna history --at 03:12 what was going on at that moment
+  kerna service install    record history in the background (a systemd user service)
+  kerna service uninstall  stop recording
+  kerna version
 
 Read-only: it reads /proc and /sys, needs no root and never runs the commands it suggests.
-`, `cause: sistem neden yavaş, sıcak ya da pili tüketiyor?
+History stays in ~/.local/state/kerna on this machine and is deleted after 7 days.
+`, `kerna: sistem neden yavaş, sıcak ya da pili tüketiyor?
 
-  cause              birkaç saniye örnekle ve neyin yanlış olduğunu açıkla
-  cause watch        canlı görünüm, birkaç saniyede bir yenilenir (çıkış: Ctrl-C)
-  cause --json       aynı teşhisi betikler ve durum çubukları için JSON olarak ver
-  cause version
+  kerna                    bir an örnekle ve neyin yanlış olduğunu açıkla
+  kerna watch              canlı görünüm: q çık, p duraklat, h geçmiş
+  kerna --json             aynı teşhisi betikler ve durum çubukları için JSON olarak ver
+  kerna history            son 24 saatteki sorunlar (daha uzun için --since 3d)
+  kerna history --at 03:12 o anda neler oluyordu
+  kerna service install    geçmişi arka planda kaydet (bir systemd kullanıcı servisi)
+  kerna service uninstall  kaydı durdur
+  kerna version
 
 Salt okunur: /proc ve /sys dosyalarını okur, root gerektirmez ve önerdiği komutları asla çalıştırmaz.
+Geçmiş bu makinede ~/.local/state/kerna içinde durur ve 7 gün sonra silinir.
 `))
 }
 
@@ -41,25 +51,39 @@ func main() {
 	if len(args) > 0 && len(args[0]) > 0 && args[0][0] != '-' {
 		cmd, args = args[0], args[1:]
 	}
-	fs := flag.NewFlagSet("cause", flag.ExitOnError)
+	sub := ""
+	if cmd == "service" && len(args) > 0 {
+		sub, args = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("kerna", flag.ExitOnError)
 	fs.Usage = usage
 	asJSON := fs.Bool("json", false, "print JSON")
 	secs := fs.Float64("n", 2, "sampling window in seconds")
+	since := fs.Duration("since", 24*time.Hour, "history: how far back to look")
+	at := fs.String("at", "", "history: show one moment, e.g. 03:12")
 	fs.Parse(args)
+
 	src := Source{Root: "/"}
-	if r := os.Getenv("CAUSE_ROOT"); r != "" {
-		src.Root = r // used by tests and for diagnosing a copy of /proc and /sys
+	if r := os.Getenv("KERNA_ROOT"); r != "" {
+		src.Root = r // a copy of another machine's /proc and /sys, and for tests
 	}
 	win := time.Duration(*secs * float64(time.Second))
 	if win < 500*time.Millisecond {
 		win = 500 * time.Millisecond
 	}
+	pal := palette{useColor(os.Stdout)}
 
 	switch cmd {
 	case "version":
-		fmt.Println("cause", version)
+		fmt.Println("kerna", version)
 	case "watch":
-		watch(src, win)
+		watch(src, time.Second)
+	case "record":
+		record(src, recordEvery)
+	case "service":
+		service(sub)
+	case "history":
+		showHistory(pal, *since, *at)
 	case "", "diagnose":
 		rep := src.Sample(win)
 		fnds := Diagnose(rep)
@@ -71,28 +95,90 @@ func main() {
 			}{append([]Finding{}, fnds...)})
 			return
 		}
-		Render(os.Stdout, palette{useColor(os.Stdout)}, rep, fnds)
+		host, _ := os.Hostname()
+		for _, l := range Frame(pal, rep, fnds, &Hist{}, 80, host, time.Now(), "", false) {
+			fmt.Println(l)
+		}
 	case "help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "cause: unknown command %q\n\n", cmd)
+		fmt.Fprintf(os.Stderr, "kerna: unknown command %q\n\n", cmd)
 		usage()
 		os.Exit(2)
 	}
 }
 
-func watch(src Source, win time.Duration) {
-	pal := palette{useColor(os.Stdout)}
-	fmt.Print("\x1b[?1049h\x1b[?25l") // alternate screen, hide cursor
-	restore := func() { fmt.Print("\x1b[?25h\x1b[?1049l") }
-	defer restore()
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	go func() { <-sig; restore(); os.Exit(0) }()
-	for {
-		rep := src.Sample(win)
-		fmt.Print("\x1b[H\x1b[2J")
-		Render(os.Stdout, pal, rep, Diagnose(rep))
-		fmt.Println(pal.c("2", L("  refreshing every few seconds, Ctrl-C to quit", "  birkaç saniyede bir yenilenir, çıkmak için Ctrl-C")))
+func showHistory(pal palette, since time.Duration, at string) {
+	now := time.Now()
+	if at != "" {
+		t, err := parseAt(at, now)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "kerna:", err)
+			os.Exit(2)
+		}
+		es, _ := readHistory(historyPath(), t.Add(-time.Hour))
+		e, ok := nearest(es, t)
+		if !ok {
+			fmt.Println(L("Nothing was recorded within 2 minutes of that time. (Recording runs only after: kerna service install)", "O saatin 2 dakika yakınında kayıt yok. (Kayıt yalnızca şundan sonra çalışır: kerna service install)"))
+			os.Exit(1)
+		}
+		for _, l := range MomentLines(pal, e, 80) {
+			fmt.Println(l)
+		}
+		return
+	}
+	es, err := readHistory(historyPath(), now.Add(-since))
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, "kerna:", err)
+		os.Exit(1)
+	}
+	for _, l := range HistoryLines(pal, es, since, 80) {
+		fmt.Println(l)
+	}
+}
+
+const unitName = "kerna.service"
+
+func unitPath() string {
+	h, _ := os.UserHomeDir()
+	return filepath.Join(h, ".config", "systemd", "user", unitName)
+}
+
+func service(sub string) {
+	run := func(a ...string) error {
+		c := exec.Command("systemctl", append([]string{"--user"}, a...)...)
+		c.Stdout, c.Stderr = os.Stdout, os.Stderr
+		return c.Run()
+	}
+	switch sub {
+	case "install":
+		exe, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "kerna:", err)
+			os.Exit(1)
+		}
+		unit := "[Unit]\nDescription=kerna: record system history\n\n[Service]\nExecStart=" + exe + " record\nNice=19\nIOSchedulingClass=idle\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n"
+		if err := os.MkdirAll(filepath.Dir(unitPath()), 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, "kerna:", err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(unitPath(), []byte(unit), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "kerna:", err)
+			os.Exit(1)
+		}
+		run("daemon-reload")
+		if err := run("enable", "--now", unitName); err != nil {
+			fmt.Fprintln(os.Stderr, "kerna: could not start the service:", err)
+			os.Exit(1)
+		}
+		fmt.Println(L("Recording started. Later: kerna history", "Kayıt başladı. Sonra bak: kerna history"))
+	case "uninstall":
+		run("disable", "--now", unitName)
+		os.Remove(unitPath())
+		run("daemon-reload")
+		fmt.Println(L("Recording stopped. Your history stays in "+stateDir()+" until you delete it.", "Kayıt durdu. Geçmişin sen silene kadar "+stateDir()+" içinde kalır."))
+	default:
+		usage()
+		os.Exit(2)
 	}
 }

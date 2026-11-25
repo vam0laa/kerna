@@ -15,7 +15,7 @@ const (
 )
 
 // Finding is one diagnosed cause: what is wrong, why, the evidence behind it
-// and a command the user may run. cause itself never runs the hint.
+// and a command the user may run. kerna itself never runs the hint.
 type Finding struct {
 	ID       string   `json:"id"`
 	Severity string   `json:"severity"`
@@ -79,6 +79,18 @@ func coreStr(x Rate) string {
 
 // hint joins a command and a translated comment.
 func hint(cmd, en, tr string) string { return cmd + "   # " + L(en, tr) }
+
+func gpuName(v string) string {
+	switch v {
+	case "nvidia":
+		return "NVIDIA"
+	case "amd":
+		return "AMD"
+	case "intel":
+		return "Intel"
+	}
+	return "GPU " + v
+}
 
 func sevOf(v float64) Severity {
 	if v >= psiBad {
@@ -181,31 +193,38 @@ func Diagnose(r Report) []Finding {
 		out = append(out, f)
 	}
 
-	// 5. dGPU awake. Only meaningful if there is an integrated GPU that drives the screen.
+	// 5. A discrete GPU is awake. Only meaningful if another GPU drives the screen.
 	var dgpu *GPU
-	hasOther := false
+	hasBoot := false
 	for i, g := range st.GPUs {
-		if g.Vendor == "nvidia" && !g.Boot {
+		if g.Boot {
+			hasBoot = true
+		}
+		if !g.Boot && dgpu == nil {
 			dgpu = &st.GPUs[i]
-		} else {
-			hasOther = true
 		}
 	}
+	if !hasBoot {
+		dgpu = nil
+	}
 	onBattery := st.Battery != nil && strings.EqualFold(st.Battery.Status, "Discharging")
-	if dgpu != nil && hasOther && dgpu.Runtime == "active" {
+	if dgpu != nil && dgpu.Runtime == "active" {
+		name := gpuName(dgpu.Vendor)
 		var holders []string
-		for _, p := range r.Procs {
-			if p.HoldsGPU {
-				holders = append(holders, fmt.Sprintf("%s (pid %d)", p.Comm, p.PID))
+		if dgpu.Vendor == "nvidia" { // only NVIDIA has its own device file; render nodes are shared
+			for _, p := range r.Procs {
+				if p.HoldsGPU {
+					holders = append(holders, fmt.Sprintf("%s (pid %d)", p.Comm, p.PID))
+				}
 			}
+			sort.Strings(holders)
 		}
-		sort.Strings(holders)
 		sev := Info
 		if onBattery {
 			sev = Warn
 		}
 		f := Finding{ID: "dgpu-awake", Sev: sev,
-			Title: L("The NVIDIA GPU is awake", "NVIDIA ekran kartı uyanık"),
+			Title: L("The "+name+" GPU is awake", name+" ekran kartı uyanık"),
 			Why: L("The discrete GPU is powered on. It draws power even when idle, which costs battery and adds heat and fan noise.",
 				"Ayrık ekran kartı açık. Boştayken bile güç çeker, bu da pil ömrünü kısaltır, ısıyı ve fan gürültüsünü artırır."),
 		}
@@ -214,22 +233,44 @@ func Diagnose(r Report) []Finding {
 			f.Why = L("The discrete GPU is powered on and its runtime power management is set to \"on\", so the kernel is not allowed to switch it off, even when no program needs it.",
 				"Ayrık ekran kartı açık ve çalışma zamanı güç yönetimi \"on\" durumunda; yani hiçbir program ihtiyaç duymasa bile çekirdeğin onu kapatmasına izin yok.")
 			f.Evidence = append(f.Evidence, fmt.Sprintf("/sys/bus/pci/devices/%s/power/control = on", dgpu.Addr))
-			f.Hint = hint(fmt.Sprintf("echo auto | sudo tee /sys/bus/pci/devices/%s/power/control", dgpu.Addr), "until reboot. The NVIDIA driver also needs NVreg_DynamicPowerManagement=0x02 for the GPU to actually sleep", "yeniden başlatmaya kadar geçerli. GPU'nun gerçekten uyuması için NVIDIA sürücüsüne ayrıca NVreg_DynamicPowerManagement=0x02 gerekir")
+			extra := ""
+			if dgpu.Vendor == "nvidia" {
+				extra = L(" The NVIDIA driver also needs NVreg_DynamicPowerManagement=0x02 for the GPU to actually sleep.", " GPU'nun gerçekten uyuması için NVIDIA sürücüsüne ayrıca NVreg_DynamicPowerManagement=0x02 gerekir.")
+			}
+			f.Hint = fmt.Sprintf("echo auto | sudo tee /sys/bus/pci/devices/%s/power/control   # %s", dgpu.Addr, L("until reboot."+extra, "yeniden başlatmaya kadar geçerli."+extra))
 		case len(holders) > 0:
 			f.Evidence = append(f.Evidence, L("kept awake by: ", "uyanık tutan: ")+strings.Join(holders, ", "))
 			f.Hint = L("close or restart the programs above, or run them on the integrated GPU; a compositor that renders on this GPU keeps it awake by design",
 				"yukarıdaki programları kapat ya da tümleşik ekran kartında çalıştır; bu kartta çizim yapan bir pencere yöneticisi kartı tasarım gereği uyanık tutar")
-		default:
+		case dgpu.Vendor == "nvidia":
 			f.Evidence = append(f.Evidence, L("no process you own has it open (a root service, another user or a browser sandbox may)", "açık tutan sana ait bir süreç yok (bir root servisi, başka bir kullanıcı ya da tarayıcı korumalı alanı olabilir)"))
 			f.Hint = hint("sudo fuser -v /dev/nvidia*", "shows every holder, including other users", "başka kullanıcılar dahil açık tutan herkesi gösterir")
+		default:
+			f.Evidence = append(f.Evidence, L("runtime power management is on (auto), so something is using the GPU right now", "çalışma zamanı güç yönetimi açık (auto); yani şu an bir şey kartı kullanıyor"))
+			f.Hint = hint("cat /sys/class/drm/card*/device/gpu_busy_percent", "how busy each GPU is (amdgpu)", "her kartın ne kadar meşgul olduğu (amdgpu)")
 		}
 		if len(holders) > 0 && dgpu.Control == "on" {
 			f.Evidence = append(f.Evidence, L("also open in: ", "ayrıca açık olan: ")+strings.Join(holders, ", "))
 		}
 		if !onBattery && st.Battery != nil {
-			f.Title = L("The NVIDIA GPU is awake (plugged in, so no battery cost)", "NVIDIA ekran kartı uyanık (fişte, pile maliyeti yok)")
+			f.Title = L("The "+name+" GPU is awake (plugged in, so no battery cost)", name+" ekran kartı uyanık (fişte, pile maliyeti yok)")
 		}
 		out = append(out, f)
+	}
+
+	// 5b. A GPU that is almost fully busy (amdgpu reports this).
+	for _, g := range st.GPUs {
+		if g.BusyPct >= 95 {
+			sev := Info
+			if onBattery {
+				sev = Warn
+			}
+			out = append(out, Finding{ID: "gpu-busy", Sev: sev,
+				Title: L(fmt.Sprintf("The %s GPU is %d%% busy", gpuName(g.Vendor), g.BusyPct), fmt.Sprintf("%s ekran kartı %%%d meşgul", gpuName(g.Vendor), g.BusyPct)),
+				Why: L("A game, video or heavy window is using almost all of the GPU. That is normal while it runs, and it is why the fans and the battery work harder.",
+					"Bir oyun, video ya da ağır bir pencere ekran kartının neredeyse tamamını kullanıyor. Çalışırken normal, fanların ve pilin daha çok yorulmasının sebebi de bu."),
+				Hint: hint("nvtop", "shows which program is using each GPU (nvtop package)", "hangi programın hangi ekran kartını kullandığını gösterir (nvtop paketi)")})
+		}
 	}
 
 	// 6. Battery drains fast.

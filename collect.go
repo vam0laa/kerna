@@ -93,6 +93,7 @@ type GPU struct {
 	Runtime string // active, suspended, ...
 	Control string // "auto" lets the kernel power the GPU down, "on" keeps it always on
 	Boot    bool   // boot_vga: the GPU driving the built-in display on most laptops
+	BusyPct int    // amdgpu only: how busy the GPU is right now, -1 when the driver does not say
 }
 
 func parseStatLine(line string) (Proc, bool) {
@@ -178,6 +179,8 @@ func (s Source) readRaw() Raw {
 		}
 		f.Close()
 	}
+	_, nvErr := os.Stat(s.p("proc/driver/nvidia")) // only scan open files when an NVIDIA driver exists
+	scanFD := nvErr == nil
 	entries, _ := os.ReadDir(s.p("proc"))
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
@@ -204,6 +207,10 @@ func (s Source) readRaw() Raw {
 					pr.WriteB = n
 				}
 			}
+		}
+		if !scanFD {
+			r.Procs[pid] = pr
+			continue
 		}
 		if fds, err := os.ReadDir(s.p("proc", e.Name(), "fd")); err == nil {
 			for _, fd := range fds {
@@ -333,6 +340,10 @@ func (s Source) readGPUs() []GPU {
 		g.Control, _ = s.read(rel, "power/control")
 		bv, _ := s.read(rel, "boot_vga")
 		g.Boot = bv == "1"
+		g.BusyPct = -1
+		if n, ok := s.readInt(rel, "gpu_busy_percent"); ok {
+			g.BusyPct = int(n)
+		}
 		out = append(out, g)
 	}
 	return out
@@ -397,7 +408,11 @@ func Diff(a, b Raw, st Static) Report {
 	if b.MajFaults >= a.MajFaults {
 		rep.MajPerS = float64(b.MajFaults-a.MajFaults) / sec
 	}
+	self := os.Getpid()
 	for pid, pb := range b.Procs {
+		if pid == self {
+			continue // measuring must not show up as the cause
+		}
 		pa, ok := a.Procs[pid]
 		if !ok || pa.Comm != pb.Comm {
 			continue
