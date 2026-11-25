@@ -415,3 +415,34 @@ func TestFrameListsTheBusiestPrograms(t *testing.T) {
 		t.Fatalf("output:\n%s", out)
 	}
 }
+
+func TestNVIDIARuntimeD3DisabledIsExplained(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	f.write("sys/bus/pci/devices/0000:01:00.0/class", "0x030000")
+	f.write("sys/bus/pci/devices/0000:01:00.0/vendor", "0x10de")
+	f.write("sys/bus/pci/devices/0000:01:00.0/power/runtime_status", "active")
+	f.write("sys/bus/pci/devices/0000:01:00.0/power/control", "auto")
+	f.write("sys/bus/pci/devices/0000:65:00.0/class", "0x030000")
+	f.write("sys/bus/pci/devices/0000:65:00.0/vendor", "0x1002")
+	f.write("sys/bus/pci/devices/0000:65:00.0/boot_vga", "1")
+	f.write("proc/driver/nvidia/gpus/0000:01:00.0/power", "Runtime D3 status:          Disabled by default\nVideo Memory:               Active\n")
+	f.proc(60, "idle", 0, 100, 0, 0)
+	got := f.diagnose(func() { f.proc(60, "idle", 1, 100, 0, 0) })
+	if ids(got) != "dgpu-awake" {
+		t.Fatalf("got %s", ids(got))
+	}
+	ev := strings.Join(got[0].Evidence, "\n")
+	if !strings.Contains(ev, "Runtime D3 (the sleep state) is disabled by default") || !strings.Contains(got[0].Hint, "NVreg_DynamicPowerManagement=0x02") {
+		t.Fatalf("evidence=%q hint=%q", ev, got[0].Hint)
+	}
+}
+
+func TestOnlyNotesStillLooksFine(t *testing.T) {
+	r := Report{Window: time.Second, PSI: map[string]PSI{}, Static: Static{MemTotalKiB: 100, MemAvailKiB: 50}}
+	fs := []Finding{{ID: "dgpu-awake", Sev: Info, Title: "A GPU is awake", Why: "w"}}
+	out := strings.Join(Frame(palette{false}, r, fs, &Hist{}, 80, "h", time.Now(), "", false), "\n")
+	if !strings.Contains(out, "Everything looks fine") || !strings.Contains(out, "1 note") || !strings.Contains(out, "── Notes") {
+		t.Fatalf("output:\n%s", out)
+	}
+}

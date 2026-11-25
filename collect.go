@@ -90,13 +90,14 @@ type Battery struct {
 }
 
 type GPU struct {
-	Addr    string
-	Vendor  string  // "nvidia", "amd", "intel", other hex
-	Runtime string  // active, suspended, ...
-	Control string  // "auto" lets the kernel power the GPU down, "on" keeps it always on
-	Boot    bool    // boot_vga: the GPU driving the built-in display on most laptops
-	BusyPct int     // how busy the GPU is: amdgpu reports it, Intel is derived from idle residency; -1 when unknown
-	Watts   float64 // amdgpu reports its power draw; 0 when unknown
+	Addr     string
+	Vendor   string  // "nvidia", "amd", "intel", other hex
+	Runtime  string  // active, suspended, ...
+	Control  string  // "auto" lets the kernel power the GPU down, "on" keeps it always on
+	Boot     bool    // boot_vga: the GPU driving the built-in display on most laptops
+	BusyPct  int     // how busy the GPU is: amdgpu reports it, Intel is derived from idle residency; -1 when unknown
+	Watts    float64 // amdgpu reports its power draw; 0 when unknown
+	NvidiaD3 string  // the NVIDIA driver's own "Runtime D3 status", e.g. "Disabled by default"
 }
 
 func parseStatLine(line string) (Proc, bool) {
@@ -388,6 +389,15 @@ func (s Source) readGPUs() []GPU {
 		bv, _ := s.read(rel, "boot_vga")
 		g.Boot = bv == "1"
 		g.BusyPct = -1
+		if g.Vendor == "nvidia" {
+			if txt, ok := s.read("proc/driver/nvidia/gpus", g.Addr, "power"); ok {
+				for _, line := range strings.Split(txt, "\n") {
+					if v, found := strings.CutPrefix(line, "Runtime D3 status:"); found {
+						g.NvidiaD3 = strings.TrimSpace(v)
+					}
+				}
+			}
+		}
 		if m, _ := filepath.Glob(filepath.Join(d, "hwmon/hwmon*/power1_average")); len(m) > 0 {
 			if uw, ok := s.readInt(strings.TrimPrefix(m[0], s.Root)); ok {
 				g.Watts = float64(uw) / 1e6

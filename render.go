@@ -261,30 +261,53 @@ func gpuLine(st Static) string {
 	return strings.Join(parts, "  ·  ")
 }
 
+func worstOf(fs []Finding) Severity {
+	w := Info
+	for _, f := range fs {
+		if f.Sev > w {
+			w = f.Sev
+		}
+	}
+	return w
+}
+
 func rule(p palette, title string, width int) string {
 	t := "── " + title + " "
 	return p.c(cDim, t+strings.Repeat("─", max(0, width-vlen(t))))
 }
 
 func verdict(p palette, fs []Finding) string {
-	if len(fs) == 0 {
-		return p.c(cOK, "●") + " " + p.c(cBold+";"+cOK, L("Everything looks fine", "Her şey yolunda"))
-	}
+	attention, notes := 0, 0
 	worst := Info
 	for _, f := range fs {
+		if f.Sev == Info {
+			notes++
+			continue
+		}
+		attention++
 		if f.Sev > worst {
 			worst = f.Sev
 		}
+	}
+	noteTxt := ""
+	if notes > 0 {
+		noteTxt = p.c(cDim, L(fmt.Sprintf("  ·  %d note", notes), fmt.Sprintf("  ·  %d not", notes)))
+		if notes > 1 && lang != "tr" {
+			noteTxt = p.c(cDim, fmt.Sprintf("  ·  %d notes", notes))
+		}
+	}
+	if attention == 0 {
+		return p.c(cOK, "●") + " " + p.c(cBold+";"+cOK, L("Everything looks fine", "Her şey yolunda")) + noteTxt
 	}
 	col := cWarn
 	if worst == Bad {
 		col = cBad
 	}
 	txt := L("1 thing needs attention", "1 şey dikkat istiyor")
-	if len(fs) > 1 {
-		txt = L(fmt.Sprintf("%d things need attention", len(fs)), fmt.Sprintf("%d şey dikkat istiyor", len(fs)))
+	if attention > 1 {
+		txt = L(fmt.Sprintf("%d things need attention", attention), fmt.Sprintf("%d şey dikkat istiyor", attention))
 	}
-	return p.c(col, "●") + " " + p.c(cBold+";"+col, txt)
+	return p.c(col, "●") + " " + p.c(cBold+";"+col, txt) + noteTxt
 }
 
 // Frame builds the whole screen as lines. width is the usable width.
@@ -349,7 +372,11 @@ func Frame(p palette, r Report, fs []Finding, h *Hist, width int, host string, n
 	out = append(out, "")
 
 	if len(fs) > 0 {
-		out = append(out, rule(p, L("What is wrong", "Neyin yanlış olduğu"), width), "")
+		title := L("What is wrong", "Neyin yanlış olduğu")
+		if worstOf(fs) == Info {
+			title = L("Notes", "Notlar")
+		}
+		out = append(out, rule(p, title, width), "")
 	}
 	for _, f := range fs {
 		col := cOK
@@ -380,7 +407,7 @@ func Frame(p palette, r Report, fs []Finding, h *Hist, width int, host string, n
 		}
 		if f.Hint != "" {
 			cmd, comment, _ := strings.Cut(f.Hint, "   # ")
-			out = append(out, "    "+p.c(cDim, "$ ")+p.c(cBold, clip(cmd, width-6)))
+			out = append(out, "    "+p.c(cDim, "$ ")+p.c(cBold, cmd))
 			for _, l := range wrap(comment, width-6) {
 				out = append(out, "      "+p.c(cDim, l))
 			}

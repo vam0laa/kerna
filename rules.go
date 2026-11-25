@@ -228,20 +228,33 @@ func Diagnose(r Report) []Finding {
 			Why: L("The discrete GPU is powered on. It draws power even when idle, which costs battery and adds heat and fan noise.",
 				"Ayrık ekran kartı açık. Boştayken bile güç çeker, bu da pil ömrünü kısaltır, ısıyı ve fan gürültüsünü artırır."),
 		}
+		d3off := dgpu.Vendor == "nvidia" && strings.Contains(strings.ToLower(dgpu.NvidiaD3), "disabled")
+		if d3off {
+			f.Evidence = append(f.Evidence, L("NVIDIA driver: Runtime D3 (the sleep state) is "+strings.ToLower(dgpu.NvidiaD3), "NVIDIA sürücüsü: Runtime D3 (uyku durumu) "+strings.ToLower(dgpu.NvidiaD3)))
+		}
 		switch {
+		case d3off:
+			f.Why = L("The discrete GPU is powered on, and the NVIDIA driver does not allow it to sleep: its runtime power management (Runtime D3) is disabled. Two switches decide this, the driver option and the kernel's power/control file.",
+				"Ayrık ekran kartı açık ve NVIDIA sürücüsü onun uyumasına izin vermiyor: çalışma zamanı güç yönetimi (Runtime D3) kapalı. Bunu iki anahtar belirliyor: sürücü seçeneği ve çekirdeğin power/control dosyası.")
+			if dgpu.Control == "on" {
+				f.Evidence = append(f.Evidence, fmt.Sprintf("/sys/bus/pci/devices/%s/power/control = on", dgpu.Addr))
+			}
+			f.Hint = "echo 'options nvidia NVreg_DynamicPowerManagement=0x02' | sudo tee /etc/modprobe.d/nvidia-pm.conf   # " +
+				L("then reboot (run sudo mkinitcpio -P first if nvidia is in your initramfs); also set power/control to auto, with a udev rule or: echo auto | sudo tee /sys/bus/pci/devices/"+dgpu.Addr+"/power/control",
+					"sonra yeniden başlat (nvidia initramfs içindeyse önce sudo mkinitcpio -P); ayrıca power/control değerini auto yap: udev kuralıyla ya da echo auto | sudo tee /sys/bus/pci/devices/"+dgpu.Addr+"/power/control")
 		case dgpu.Control == "on":
 			f.Why = L("The discrete GPU is powered on and its runtime power management is set to \"on\", so the kernel is not allowed to switch it off, even when no program needs it.",
 				"Ayrık ekran kartı açık ve çalışma zamanı güç yönetimi \"on\" durumunda; yani hiçbir program ihtiyaç duymasa bile çekirdeğin onu kapatmasına izin yok.")
 			f.Evidence = append(f.Evidence, fmt.Sprintf("/sys/bus/pci/devices/%s/power/control = on", dgpu.Addr))
 			extra := ""
-			if dgpu.Vendor == "nvidia" {
-				extra = L(" The NVIDIA driver also needs NVreg_DynamicPowerManagement=0x02 for the GPU to actually sleep.", " GPU'nun gerçekten uyuması için NVIDIA sürücüsüne ayrıca NVreg_DynamicPowerManagement=0x02 gerekir.")
+			if dgpu.Vendor == "nvidia" && dgpu.NvidiaD3 == "" {
+				extra = L(" If it still does not sleep, the NVIDIA driver may also need NVreg_DynamicPowerManagement=0x02.", " Hâlâ uyumazsa NVIDIA sürücüsüne ayrıca NVreg_DynamicPowerManagement=0x02 gerekebilir.")
 			}
 			f.Hint = fmt.Sprintf("echo auto | sudo tee /sys/bus/pci/devices/%s/power/control   # %s", dgpu.Addr, L("until reboot."+extra, "yeniden başlatmaya kadar geçerli."+extra))
 		case len(holders) > 0:
 			f.Evidence = append(f.Evidence, L("kept awake by: ", "uyanık tutan: ")+strings.Join(holders, ", "))
-			f.Hint = L("close or restart the programs above, or run them on the integrated GPU; a compositor that renders on this GPU keeps it awake by design",
-				"yukarıdaki programları kapat ya da tümleşik ekran kartında çalıştır; bu kartta çizim yapan bir pencere yöneticisi kartı tasarım gereği uyanık tutar")
+			f.Hint = L("close or restart the programs above, or run them on the integrated GPU",
+				"yukarıdaki programları kapat ya da tümleşik ekran kartında çalıştır")
 		case dgpu.Vendor == "nvidia":
 			f.Evidence = append(f.Evidence, L("no process you own has it open (a root service, another user or a browser sandbox may)", "açık tutan sana ait bir süreç yok (bir root servisi, başka bir kullanıcı ya da tarayıcı korumalı alanı olabilir)"))
 			f.Hint = hint("sudo fuser -v /dev/nvidia*", "shows every holder, including other users", "başka kullanıcılar dahil açık tutan herkesi gösterir")
@@ -249,7 +262,15 @@ func Diagnose(r Report) []Finding {
 			f.Evidence = append(f.Evidence, L("runtime power management is on (auto), so something is using the GPU right now", "çalışma zamanı güç yönetimi açık (auto); yani şu an bir şey kartı kullanıyor"))
 			f.Hint = hint("cat /sys/class/drm/card*/device/gpu_busy_percent", "how busy each GPU is (amdgpu)", "her kartın ne kadar meşgul olduğu (amdgpu)")
 		}
-		if len(holders) > 0 && dgpu.Control == "on" {
+		for _, h := range holders {
+			switch {
+			case strings.HasPrefix(h, "Hyprland "):
+				f.Evidence = append(f.Evidence, L("Hyprland opens every GPU by default; AQ_DRM_DEVICES=/dev/dri/cardN limits it to one (it also disables outputs wired to the other GPU)", "Hyprland varsayılan olarak her ekran kartını açar; AQ_DRM_DEVICES=/dev/dri/cardN onu tek karta sınırlar (diğer karta bağlı çıkışları da kapatır)"))
+			case strings.HasPrefix(h, "sway "):
+				f.Evidence = append(f.Evidence, L("sway opens every GPU by default; WLR_DRM_DEVICES limits it to one", "sway varsayılan olarak her ekran kartını açar; WLR_DRM_DEVICES onu tek karta sınırlar"))
+			}
+		}
+		if len(holders) > 0 && (dgpu.Control == "on" || d3off) {
 			f.Evidence = append(f.Evidence, L("also open in: ", "ayrıca açık olan: ")+strings.Join(holders, ", "))
 		}
 		if !onBattery && st.Battery != nil {
