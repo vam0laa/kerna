@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -81,15 +82,22 @@ func watch(src Source, win time.Duration) {
 	hist := &Hist{}
 	var rep Report
 	var fnds []Finding
-	have, paused, showHistory := false, false, false
+	have, paused := false, false
+	view := "main" // main, history or today
+	sel, showTop := 0, false
+	toast, toastUntil := "", time.Time{}
+	say := func(s string) { toast, toastUntil = s, time.Now().Add(3*time.Second) }
 
 	draw := func() {
 		cols, rows := termSize()
 		var lines []string
 		switch {
-		case showHistory:
+		case view == "history":
 			es, _ := readHistory(historyPath(), time.Now().Add(-24*time.Hour))
 			lines = HistoryLines(pal, es, 24*time.Hour, cols-2)
+		case view == "today":
+			es, _ := readHistory(historyPath(), time.Now().Add(-24*time.Hour))
+			lines = TodayLines(pal, es, time.Now())
 		case !have:
 			lines = []string{"", "  " + pal.c(cDim, L("measuring…", "ölçülüyor…"))}
 		default:
@@ -97,11 +105,14 @@ func watch(src Source, win time.Duration) {
 			if paused {
 				note = L("paused", "duraklatıldı")
 			}
-			lines = Frame(pal, rep, fnds, hist, cols-2, host, time.Now(), note, true)
+			lines = FrameOpts(pal, rep, fnds, hist, cols-2, host, time.Now(), note, true, Opts{Sel: sel, Top: showTop})
 		}
-		foot := L("q quit  ·  p pause  ·  h history", "q çık  ·  p duraklat  ·  h geçmiş")
-		if showHistory {
-			foot = L("q quit  ·  h back", "q çık  ·  h geri")
+		foot := L("q quit  ·  p pause  ·  t programs  ·  j/k select  ·  c copy  ·  i mute  ·  h history  ·  d today", "q çık  ·  p duraklat  ·  t programlar  ·  j/k seç  ·  c kopyala  ·  i sustur  ·  h geçmiş  ·  d bugün")
+		if view != "main" {
+			foot = L("q quit  ·  esc/h/d back", "q çık  ·  h/d geri")
+		}
+		if toast != "" && time.Now().Before(toastUntil) {
+			foot = toast
 		}
 		if len(lines) > rows-2 {
 			lines = append(lines[:rows-3], pal.c(cDim, "  …"))
@@ -116,10 +127,20 @@ func watch(src Source, win time.Duration) {
 		os.Stdout.WriteString(b.String())
 	}
 	draw()
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
 	for {
 		select {
+		case <-tick.C:
+			if toast != "" && !time.Now().Before(toastUntil) {
+				toast = ""
+				draw()
+			}
 		case rep = <-reports:
 			fnds, _ = cfg.Filter(Diagnose(rep))
+			if sel >= len(fnds) {
+				sel = 0
+			}
 			if !paused {
 				hist.Add(rep)
 			}
@@ -135,7 +156,54 @@ func watch(src Source, win time.Duration) {
 				paused = !paused
 				draw()
 			case 'h', 'H':
-				showHistory = !showHistory
+				if view == "history" {
+					view = "main"
+				} else {
+					view = "history"
+				}
+				draw()
+			case 'd', 'D', 27:
+				if view == "today" || k == 27 {
+					view = "main"
+				} else {
+					view = "today"
+				}
+				draw()
+			case 't', 'T':
+				showTop = !showTop
+				draw()
+			case 'j', 'J', 9:
+				if len(fnds) > 0 {
+					sel = (sel + 1) % len(fnds)
+				}
+				draw()
+			case 'k', 'K':
+				if len(fnds) > 0 {
+					sel = (sel + len(fnds) - 1) % len(fnds)
+				}
+				draw()
+			case 'c', 'C':
+				if sel < len(fnds) {
+					if cmd := commandOf(fnds[sel]); cmd == "" {
+						say(L("this finding has no command to copy", "bu bulgunun kopyalanacak komutu yok"))
+					} else if err := copyToClipboard(cmd); err != nil {
+						say(L("no clipboard tool found: install wl-clipboard", "pano aracı bulunamadı: wl-clipboard kur"))
+					} else {
+						say(L("copied the command", "komut kopyalandı"))
+					}
+				}
+				draw()
+			case 'i', 'I':
+				if sel < len(fnds) {
+					id := fnds[sel].ID
+					if cfg.Mute(id) && SaveConfig(cfg) == nil {
+						say(L("muted "+id+" (kerna unignore "+id+" brings it back)", id+" susturuldu (geri getirmek için: kerna unignore "+id+")"))
+						fnds, _ = cfg.Filter(fnds)
+						if sel >= len(fnds) {
+							sel = 0
+						}
+					}
+				}
 				draw()
 			}
 		case s := <-sig:
@@ -146,4 +214,26 @@ func watch(src Source, win time.Duration) {
 			}
 		}
 	}
+}
+
+// commandOf is the command part of a finding's hint, the text before the comment.
+func commandOf(f Finding) string {
+	cmd, _, _ := strings.Cut(f.Hint, "   # ")
+	return strings.TrimSpace(cmd)
+}
+
+// copyToClipboard uses whichever clipboard tool is installed.
+func copyToClipboard(s string) error {
+	for _, c := range [][]string{{"wl-copy"}, {"xclip", "-selection", "clipboard"}, {"xsel", "-b", "-i"}} {
+		path, err := exec.LookPath(c[0])
+		if err != nil {
+			continue
+		}
+		cmd := exec.Command(path, c[1:]...)
+		cmd.Stdin = strings.NewReader(s)
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("no clipboard tool")
 }

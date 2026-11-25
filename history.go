@@ -29,6 +29,12 @@ type HFinding struct {
 	Evidence []string `json:"e,omitempty"`
 }
 
+// HTop is one of the busiest programs of a sample.
+type HTop struct {
+	N string  `json:"n"`
+	C float64 `json:"c"`
+}
+
 type Entry struct {
 	T        time.Time  `json:"t"`
 	CPU      float64    `json:"cpu"` // busy, 0..100
@@ -36,7 +42,11 @@ type Entry struct {
 	PIO      float64    `json:"pi"`
 	PMem     float64    `json:"pm"`
 	Temp     float64    `json:"temp,omitempty"` // °C
-	Watts    float64    `json:"w,omitempty"`
+	Watts    float64    `json:"w,omitempty"`    // battery draw, only while discharging
+	GPUWatts float64    `json:"gw,omitempty"`   // power draw reported by GPU drivers (amdgpu)
+	Bat      int        `json:"b,omitempty"`    // battery percent
+	Plugged  bool       `json:"pl,omitempty"`   // charging or full
+	Top      []HTop     `json:"top,omitempty"`  // the busiest programs: name and percent of one core
 	Findings []HFinding `json:"f,omitempty"`
 }
 
@@ -48,6 +58,8 @@ var titles = map[string][2]string{
 	"dgpu-awake":       {"A discrete GPU was awake", "Ayrık ekran kartı uyanıktı"},
 	"gpu-busy":         {"A GPU was almost fully busy", "Bir ekran kartı neredeyse tamamen meşguldü"},
 	"battery-drain":    {"The battery was draining fast", "Pil hızlı tükeniyordu"},
+	"net-loss":         {"Network connections were losing packets", "Ağ bağlantıları paket kaybediyordu"},
+	"wifi-weak":        {"The Wi-Fi signal was weak", "Wi-Fi sinyali zayıftı"},
 	"power-profile":    {"A performance power profile was active on battery", "Pilde performans güç profili açıktı"},
 }
 
@@ -71,8 +83,21 @@ func historyPath() string { return filepath.Join(stateDir(), "history.jsonl") }
 func entryOf(r Report, fs []Finding, now time.Time) Entry {
 	e := Entry{T: now.Truncate(time.Second), CPU: round1(r.CPUBusy * 100), PCPU: r.PSI["cpu"].SomeAvg10,
 		PIO: r.PSI["io"].SomeAvg10, PMem: r.PSI["memory"].SomeAvg10, Temp: round1(r.Static.MaxTempC)}
-	if b := r.Static.Battery; b != nil && strings.EqualFold(b.Status, "Discharging") {
-		e.Watts = round1(b.Watts)
+	if b := r.Static.Battery; b != nil {
+		e.Bat = b.Percent
+		e.Plugged = !strings.EqualFold(b.Status, "Discharging")
+		if !e.Plugged {
+			e.Watts = round1(b.Watts)
+		}
+	}
+	for _, g := range r.Static.GPUs {
+		e.GPUWatts += g.Watts
+	}
+	e.GPUWatts = round1(e.GPUWatts)
+	for _, g := range r.GroupCPU(3) {
+		if g.CPU >= 1 {
+			e.Top = append(e.Top, HTop{N: g.Comm, C: round1(g.CPU)})
+		}
 	}
 	for _, f := range fs {
 		e.Findings = append(e.Findings, HFinding{ID: f.ID, Sev: f.Sev, Evidence: f.Evidence})

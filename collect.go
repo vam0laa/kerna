@@ -63,6 +63,7 @@ type Raw struct {
 	PSI       map[string]PSI
 	SwapPages uint64 // pswpin + pswpout
 	MajFaults uint64
+	Net       NetCounters
 	GPUIdleMs map[string]uint64 // Intel: milliseconds spent in the GPU's idle state, per PCI address
 }
 
@@ -79,6 +80,8 @@ type Static struct {
 	FreqRatio    float64 // current / max, averaged over CPUs; 0 if unknown
 	Battery      *Battery
 	GPUs         []GPU
+	WifiIface    string // first wireless interface that reports a signal
+	WifiDBm      int    // its signal level in dBm, 0 when unknown
 	Profile      string // ACPI platform profile: low-power, quiet, balanced, performance
 	EPP          string // CPU energy/performance preference (amd-pstate and intel_pstate)
 }
@@ -237,6 +240,7 @@ func (s Source) readRaw() Raw {
 		r.Procs[pid] = pr
 	}
 	r.GPUIdleMs = s.readGPUIdle()
+	r.Net = s.readNet()
 	return r
 }
 
@@ -333,6 +337,7 @@ func (s Source) readStatic() Static {
 	}
 	st.Profile, _ = s.read("sys/firmware/acpi/platform_profile")
 	st.EPP, _ = s.read("sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference")
+	st.WifiIface, st.WifiDBm = s.readWifi()
 	st.Battery = s.readBattery()
 	st.GPUs = s.readGPUs()
 	return st
@@ -430,13 +435,18 @@ type Rate struct {
 
 // Report is what the rules look at.
 type Report struct {
-	Window   time.Duration
-	Static   Static
-	CPUBusy  float64 // 0..1 over the window
-	PSI      map[string]PSI
-	SwapPerS float64 // pages per second moved to or from swap
-	MajPerS  float64
-	Procs    []Rate // every process seen in both samples
+	Window     time.Duration
+	Static     Static
+	CPUBusy    float64 // 0..1 over the window
+	PSI        map[string]PSI
+	SwapPerS   float64 // pages per second moved to or from swap
+	MajPerS    float64
+	NetRxBps   float64 // bytes per second over the window, all real interfaces
+	NetTxBps   float64
+	RetransPct float64 // percent of sent TCP segments that had to be sent again
+	TCPOut     uint64  // TCP segments sent in the window
+	NetBadPct  float64 // percent of packets errored or dropped
+	Procs      []Rate  // every process seen in both samples
 }
 
 func (r Report) top(n int, less func(a, b Rate) bool) []Rate {
@@ -471,6 +481,17 @@ func Diff(a, b Raw, st Static) Report {
 	}
 	if b.SwapPages >= a.SwapPages {
 		rep.SwapPerS = float64(b.SwapPages-a.SwapPages) / sec
+	}
+	if b.Net.Rx >= a.Net.Rx && b.Net.Tx >= a.Net.Tx {
+		rep.NetRxBps = float64(b.Net.Rx-a.Net.Rx) / sec
+		rep.NetTxBps = float64(b.Net.Tx-a.Net.Tx) / sec
+	}
+	if b.Net.TCPOut > a.Net.TCPOut && b.Net.TCPRetrans >= a.Net.TCPRetrans {
+		rep.TCPOut = b.Net.TCPOut - a.Net.TCPOut
+		rep.RetransPct = float64(b.Net.TCPRetrans-a.Net.TCPRetrans) / float64(rep.TCPOut) * 100
+	}
+	if b.Net.Pkts > a.Net.Pkts && b.Net.Bad >= a.Net.Bad {
+		rep.NetBadPct = float64(b.Net.Bad-a.Net.Bad) / float64(b.Net.Pkts-a.Net.Pkts) * 100
 	}
 	if b.MajFaults >= a.MajFaults {
 		rep.MajPerS = float64(b.MajFaults-a.MajFaults) / sec
@@ -530,6 +551,7 @@ type Group struct {
 	CPU     float64
 	PID     int // the busiest member
 	Wakeups float64
+	RSSKiB  int64
 	maxCPU  float64
 }
 
@@ -544,6 +566,7 @@ func (r Report) GroupCPU(n int) []Group {
 		g.Count++
 		g.CPU += p.CPU
 		g.Wakeups += p.Wakeups
+		g.RSSKiB += p.RSSKiB
 		if p.CPU >= g.maxCPU {
 			g.maxCPU, g.PID = p.CPU, p.PID
 		}

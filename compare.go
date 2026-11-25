@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -33,7 +34,7 @@ func snapOf(r Report, fs []Finding, now time.Time) Snap {
 	if st.MemTotalKiB > 0 {
 		s.MemUsed = round1(100 - float64(st.MemAvailKiB)/float64(st.MemTotalKiB)*100)
 	}
-	if st.Battery != nil {
+	if st.Battery != nil && strings.EqualFold(st.Battery.Status, "Discharging") {
 		s.Watts = round1(st.Battery.Watts)
 	}
 	for _, g := range st.GPUs {
@@ -105,11 +106,11 @@ func CompareLines(p palette, a, b Snap) []string {
 		verdict := p.c(cDim, L("same", "aynı"))
 		switch {
 		case d <= -r.minDelta:
-			verdict = p.c(cOK, fmt.Sprintf("↓ %.1f%s %s", -d, r.unit, L("better", "daha iyi")))
+			verdict = p.c(cOK, fmt.Sprintf("↓ %s%s %s", fl(-d, 1), r.unit, L("better", "daha iyi")))
 		case d >= r.minDelta:
-			verdict = p.c(cBad, fmt.Sprintf("↑ %.1f%s %s", d, r.unit, L("worse", "daha kötü")))
+			verdict = p.c(cBad, fmt.Sprintf("↑ %s%s %s", fl(d, 1), r.unit, L("worse", "daha kötü")))
 		}
-		out = append(out, fmt.Sprintf("  %-14s%-12s%-12s%s", r.label, fmt.Sprintf("%.1f%s", r.before, r.unit), fmt.Sprintf("%.1f%s", r.after, r.unit), verdict))
+		out = append(out, fmt.Sprintf("  %-14s%-12s%-12s%s", r.label, fl(r.before, 1)+r.unit, fl(r.after, 1)+r.unit, verdict))
 	}
 	var names []string
 	for k := range a.GPUState {

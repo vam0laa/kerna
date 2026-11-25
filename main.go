@@ -24,6 +24,8 @@ func usage() {
   kerna --json             the same diagnosis as JSON, for scripts and status bars
   kerna history            problems in the last 24 hours (--since 3d for longer)
   kerna history --at 03:12 what was going on at that moment
+  kerna history --today    a summary of today: battery, busiest programs, problems
+  kerna sleep              suspend problems and battery drain while asleep
   kerna service install    record history in the background (a systemd user service)
   kerna service uninstall  stop recording
   kerna why-froze          why did the last session end badly? (reads the system log with journalctl)
@@ -45,6 +47,8 @@ History stays in ~/.local/state/kerna on this machine and is deleted after 7 day
   kerna --json             aynı teşhisi betikler ve durum çubukları için JSON olarak ver
   kerna history            son 24 saatteki sorunlar (daha uzun için --since 3d)
   kerna history --at 03:12 o anda neler oluyordu
+  kerna history --today    bugünün özeti: pil, en yoğun programlar, sorunlar
+  kerna sleep              uyku sorunları ve uykudayken pil tüketimi
   kerna service install    geçmişi arka planda kaydet (bir systemd kullanıcı servisi)
   kerna service uninstall  kaydı durdur
   kerna why-froze          son oturum neden kötü bitti? (sistem günlüğünü journalctl ile okur)
@@ -78,6 +82,7 @@ func main() {
 	secs := fs.Float64("n", 2, "sampling window in seconds")
 	since := fs.Duration("since", 24*time.Hour, "history: how far back to look")
 	at := fs.String("at", "", "history: show one moment, e.g. 03:12")
+	today := fs.Bool("today", false, "history: a summary of today")
 	fs.Parse(args)
 
 	src := Source{Root: "/"}
@@ -136,7 +141,19 @@ func main() {
 	case "service":
 		service(sub)
 	case "history":
+		if *today {
+			es, _ := readHistory(historyPath(), time.Now().Add(-24*time.Hour))
+			for _, l := range TodayLines(pal, es, time.Now()) {
+				fmt.Println(l)
+			}
+			return
+		}
 		showHistory(pal, *since, *at)
+	case "sleep":
+		es, _ := readHistory(historyPath(), time.Now().Add(-keepFor))
+		for _, l := range SleepLines(pal, src.readSleep(), es) {
+			fmt.Println(l)
+		}
 	case "", "diagnose":
 		rep := src.Sample(win)
 		fnds, muted := cfg.Filter(Diagnose(rep))

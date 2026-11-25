@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -22,4 +23,13 @@ func L(en, tr string) string {
 		return tr
 	}
 	return en
+}
+
+// fl formats a number with d decimals, using a comma when the language is Turkish.
+func fl(v float64, d int) string {
+	s := strconv.FormatFloat(v, 'f', d, 64)
+	if lang == "tr" {
+		s = strings.Replace(s, ".", ",", 1)
+	}
+	return s
 }

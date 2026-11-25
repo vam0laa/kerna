@@ -672,3 +672,156 @@ func TestWhyFrozeCleanShutdownAndNoCause(t *testing.T) {
 		t.Fatalf("output:\n%s", out)
 	}
 }
+
+func TestChargingRowIsNotShownAsConsumption(t *testing.T) {
+	r := Report{Window: time.Second, PSI: map[string]PSI{}, Static: Static{MemTotalKiB: 100, MemAvailKiB: 50, Battery: &Battery{Name: "BAT1", Status: "Charging", Percent: 31, Watts: 81.3}}}
+	out := strings.Join(Frame(palette{false}, r, nil, &Hist{}, 80, "h", time.Now(), "", false), "\n")
+	if !strings.Contains(out, "Charging") || !strings.Contains(out, "+81.3 W") || strings.Contains(out, "Power ") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
+func TestTurkishUsesDecimalComma(t *testing.T) {
+	old := lang
+	lang = "tr"
+	defer func() { lang = old }()
+	if fl(28.34, 1) != "28,3" || fl(5, 0) != "5" {
+		t.Fatalf("got %q %q", fl(28.34, 1), fl(5, 0))
+	}
+	lang = "en"
+	if fl(28.34, 1) != "28.3" {
+		t.Fatal("english keeps the dot")
+	}
+}
+
+func TestParseNetDevAndSNMP(t *testing.T) {
+	dev := `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 500 5 0 0 0 0 0 0 500 5 0 0 0 0 0 0
+wlp3s0: 1000 10 1 2 0 0 0 0 2000 20 0 3 0 0 0 0
+docker0: 9999 99 0 0 0 0 0 0 9999 99 0 0 0 0 0 0
+`
+	c := parseNetDev(dev)
+	if c.Rx != 1000 || c.Tx != 2000 || c.Pkts != 30 || c.Bad != 6 {
+		t.Fatalf("%+v", c)
+	}
+	out, re := parseSNMPTcp("Tcp: RtoAlgorithm OutSegs RetransSegs InErrs\nTcp: 1 4000 120 0\n")
+	if out != 4000 || re != 120 {
+		t.Fatalf("%d %d", out, re)
+	}
+}
+
+func TestPacketLossFinding(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	f.write("proc/net/snmp", "Tcp: OutSegs RetransSegs\nTcp: 1000 10\n")
+	f.write("proc/net/dev", " face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
+	f.proc(1, "idle", 0, 100, 0, 0)
+	got := f.diagnose(func() {
+		f.write("proc/net/snmp", "Tcp: OutSegs RetransSegs\nTcp: 2000 110\n") // 1000 sent, 100 again: 10%
+		f.proc(1, "idle", 1, 100, 0, 0)
+	})
+	if ids(got) != "net-loss" || got[0].Sev != Bad || !strings.Contains(got[0].Why, "10.0%") {
+		t.Fatalf("got %s %+v", ids(got), got)
+	}
+}
+
+func TestWeakWifiOnlyWhenTheDriverReportsIt(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	f.write("proc/net/wireless", "Inter-| sta-|   Quality        |   Discarded packets\n face | tus | link level noise |  nwid\nwlan0: 0000   40.  -78.  -256        0\n")
+	f.proc(1, "idle", 0, 100, 0, 0)
+	got := f.diagnose(func() { f.proc(1, "idle", 1, 100, 0, 0) })
+	if ids(got) != "wifi-weak" || !strings.Contains(got[0].Why, "-78 dBm") {
+		t.Fatalf("got %s", ids(got))
+	}
+	f.write("proc/net/wireless", "Inter-| sta-|   Quality        |   Discarded packets\n face | tus | link level noise |  nwid\n")
+	if got := f.diagnose(func() { f.proc(1, "idle", 2, 100, 0, 0) }); len(got) != 0 {
+		t.Fatalf("an empty file means unknown, got %s", ids(got))
+	}
+}
+
+func TestDescribeAndLabel(t *testing.T) {
+	if got := label("qs", 1248, 1); got != "qs (pid 1248) · Quickshell, your desktop shell" {
+		t.Fatalf("got %q", got)
+	}
+	if got := label("ffmpeg", 7, 3); got != "ffmpeg ×3" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestCommandOf(t *testing.T) {
+	if got := commandOf(Finding{Hint: "echo auto | sudo tee /x   # until reboot"}); got != "echo auto | sudo tee /x" {
+		t.Fatalf("got %q", got)
+	}
+	if commandOf(Finding{}) != "" {
+		t.Fatal("no hint, no command")
+	}
+}
+
+func TestFrameMarksTheSelectedFindingAndListsPrograms(t *testing.T) {
+	r := Report{Window: time.Second, PSI: map[string]PSI{}, Static: Static{MemTotalKiB: 100, MemAvailKiB: 50},
+		Procs: []Rate{{PID: 1, Comm: "qs", CPU: 40, Wakeups: 300, RSSKiB: 2 << 20}}}
+	fs := []Finding{{ID: "a", Sev: Warn, Title: "First", Why: "w"}, {ID: "b", Sev: Warn, Title: "Second", Why: "w"}}
+	out := strings.Join(FrameOpts(palette{false}, r, fs, &Hist{}, 90, "h", time.Now(), "", true, Opts{Sel: 1, Top: true}), "\n")
+	for _, want := range []string{"▸ Second", "● First", "── Programs", "qs · Quickshell, your desktop shell", "40%", "300", "2.0 GiB"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestTodaySummary(t *testing.T) {
+	now := time.Date(2026, 11, 25, 18, 0, 0, 0, time.Local)
+	var es []Entry
+	for i := 0; i < 240; i++ { // one hour of samples at 14:xx on battery
+		es = append(es, Entry{T: time.Date(2026, 11, 25, 14, 0, 0, 0, time.Local).Add(time.Duration(i) * recordEvery), Watts: 20, GPUWatts: 10, Top: []HTop{{N: "qs", C: 40}, {N: "firefox", C: 20}}})
+	}
+	es = append(es, Entry{T: now.Add(-48 * time.Hour), Watts: 99}) // yesterday: ignored
+	out := strings.Join(TodayLines(palette{false}, es, now), "\n")
+	for _, want := range []string{"Recorded 1.0 hours, 240 samples", "about 20 Wh used", "average 20.0 W", "qs · Quickshell", "40%", "No problems today", "The GPU drivers reported 10.0 W"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "99") {
+		t.Fatalf("yesterday leaked into today:\n%s", out)
+	}
+}
+
+func TestSleepGapsAndModes(t *testing.T) {
+	t0 := time.Date(2026, 11, 25, 23, 0, 0, 0, time.Local)
+	es := []Entry{
+		{T: t0, Bat: 80},
+		{T: t0.Add(8 * time.Hour), Bat: 62}, // 18 points in 8 h: 2.25 %/h
+		{T: t0.Add(8*time.Hour + recordEvery), Bat: 62},
+		{T: t0.Add(9 * time.Hour), Bat: 61, Plugged: true}, // plugged: not a sleep gap
+		{T: t0.Add(20 * time.Hour), Bat: 90, Plugged: true},
+	}
+	gaps := SleepGaps(es)
+	if len(gaps) != 1 || gaps[0].Rate() < 2.2 || gaps[0].Rate() > 2.3 {
+		t.Fatalf("gaps = %+v", gaps)
+	}
+	sel, deep := selectedSleep("[s2idle] deep")
+	if sel != "s2idle" || !deep {
+		t.Fatalf("%q %v", sel, deep)
+	}
+	st := SleepStats{Success: 3, Fail: 1, LastFailedDev: "0000:01:00.0", LastFailedStep: "suspend", MemSleep: "[s2idle] deep", Known: true}
+	out := strings.Join(SleepLines(palette{false}, st, es), "\n")
+	for _, want := range []string{"3 succeeded, 1 failed", "device 0000:01:00.0", "mem_sleep_default=deep", "2.2%/h", "high"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestSleepStatsFromSysfs(t *testing.T) {
+	f := newFixture(t)
+	f.write("sys/power/suspend_stats/success", "12")
+	f.write("sys/power/suspend_stats/fail", "0")
+	f.write("sys/power/mem_sleep", "s2idle [deep]")
+	st := Source{Root: f.root}.readSleep()
+	if !st.Known || st.Success != 12 || st.MemSleep != "s2idle [deep]" {
+		t.Fatalf("%+v", st)
+	}
+}

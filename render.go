@@ -92,7 +92,7 @@ func pad(s string, n int) string {
 var sparkRunes = []rune("▁▂▃▄▅▆▇█")
 
 // spark draws the last `width` values on a fixed 0..max scale.
-func spark(vals []float64, width int, max float64) string {
+func spark(vals []float64, width int, min, max float64) string {
 	if len(vals) > width {
 		vals = vals[len(vals)-width:]
 	}
@@ -116,10 +116,10 @@ func spark(vals []float64, width int, max float64) string {
 }
 
 // gauge is the one-shot counterpart of spark: a filled bar.
-func gauge(v, max float64, width int) (full, empty string) {
+func gauge(v, min, max float64, width int) (full, empty string) {
 	n := 0
-	if max > 0 {
-		n = int(v/max*float64(width) + 0.5)
+	if max > min {
+		n = int((v-min)/(max-min)*float64(width) + 0.5)
 	}
 	if n < 0 {
 		n = 0
@@ -153,7 +153,7 @@ func (h *Hist) Add(r Report) {
 		h.Mem = push(h.Mem, 100-float64(st.MemAvailKiB)/float64(st.MemTotalKiB)*100)
 	}
 	h.Temp = push(h.Temp, st.MaxTempC)
-	if st.Battery != nil {
+	if st.Battery != nil && strings.EqualFold(st.Battery.Status, "Discharging") {
 		h.Watts = push(h.Watts, st.Battery.Watts)
 	}
 }
@@ -163,6 +163,7 @@ func (h *Hist) Add(r Report) {
 type metric struct {
 	label  string
 	series []float64
+	min    float64
 	max    float64
 	value  string
 	note   string
@@ -217,29 +218,34 @@ func metrics(r Report, h *Hist) []metric {
 		case st.MaxTempC >= 80:
 			tsev = Warn
 		}
-		ms = append(ms, metric{label: L("Temperature", "Sıcaklık"), series: last(h.Temp, st.MaxTempC), max: 100, value: fmt.Sprintf("%.0f °C", st.MaxTempC), sev: tsev})
+		ms = append(ms, metric{label: L("Temperature", "Sıcaklık"), series: last(h.Temp, st.MaxTempC), min: 30, max: 100, value: fmt.Sprintf("%.0f °C", st.MaxTempC), sev: tsev})
 	}
 	if b := st.Battery; b != nil {
 		note := fmt.Sprintf("%d%%", b.Percent)
-		wsev := Info
 		if strings.EqualFold(b.Status, "Discharging") {
+			wsev := Info
 			if b.HoursLeft > 0 {
-				note += fmt.Sprintf(", %.1f h %s", b.HoursLeft, L("left", "kaldı"))
+				note += fmt.Sprintf(", %s h %s", fl(b.HoursLeft, 1), L("left", "kaldı"))
 			}
 			if b.Watts >= drainWatts {
 				wsev = Warn
 			}
+			if st.Profile != "" {
+				note += ", " + L("profile ", "profil ") + st.Profile
+			}
+			mx := 60.0
+			if b.Watts > mx {
+				mx = b.Watts
+			}
+			ms = append(ms, metric{label: L("Power", "Güç"), series: last(h.Watts, b.Watts), max: mx, value: fl(b.Watts, 1) + " W", note: note, sev: wsev})
 		} else {
-			note += ", " + strings.ToLower(b.Status)
+			// While charging the kernel reports how fast the battery fills, not what the system uses.
+			note += ", " + L("charging", "şarj oluyor")
+			if strings.EqualFold(b.Status, "Full") {
+				note = fmt.Sprintf("%d%%, %s", b.Percent, L("full", "dolu"))
+			}
+			ms = append(ms, metric{label: L("Charging", "Şarj"), series: []float64{b.Watts}, max: 140, value: "+" + fl(b.Watts, 1) + " W", note: note, sev: Info})
 		}
-		if st.Profile != "" && strings.EqualFold(b.Status, "Discharging") {
-			note += ", " + L("profile ", "profil ") + st.Profile
-		}
-		mx := 60.0
-		if b.Watts > mx {
-			mx = b.Watts
-		}
-		ms = append(ms, metric{label: L("Power", "Güç"), series: last(h.Watts, b.Watts), max: mx, value: fmt.Sprintf("%.1f W", b.Watts), note: note, sev: wsev})
 	}
 	return ms
 }
@@ -313,8 +319,19 @@ func verdict(p palette, fs []Finding) string {
 	return p.c(col, "●") + " " + p.c(cBold+";"+col, txt) + noteTxt
 }
 
+// Opts are the interactive extras of the live view.
+type Opts struct {
+	Sel int  // index of the selected finding; -1 for none
+	Top bool // show the list of busiest programs
+}
+
 // Frame builds the whole screen as lines. width is the usable width.
 func Frame(p palette, r Report, fs []Finding, h *Hist, width int, host string, now time.Time, note string, live bool) []string {
+	return FrameOpts(p, r, fs, h, width, host, now, note, live, Opts{Sel: -1})
+}
+
+// FrameOpts is Frame with the interactive extras.
+func FrameOpts(p palette, r Report, fs []Finding, h *Hist, width int, host string, now time.Time, note string, live bool, o Opts) []string {
 	if width > 96 {
 		width = 96
 	}
@@ -344,9 +361,9 @@ func Frame(p palette, r Report, fs []Finding, h *Hist, width int, host string, n
 		}
 		var viz string
 		if live {
-			viz = p.c(col, spark(m.series, sparkW, m.max))
+			viz = p.c(col, spark(m.series, sparkW, m.min, m.max))
 		} else {
-			full, empty := gauge(m.series[len(m.series)-1], m.max, sparkW)
+			full, empty := gauge(m.series[len(m.series)-1], m.min, m.max, sparkW)
 			viz = p.c(col, full) + p.c(cDim, empty)
 		}
 		line := "  " + p.c(cDim, pad(m.label, labelW)) + viz + "  " + p.c(cText, pad(m.value, 9))
@@ -354,6 +371,13 @@ func Frame(p palette, r Report, fs []Finding, h *Hist, width int, host string, n
 			line += p.c(cDim, m.note)
 		}
 		out = append(out, line)
+	}
+	if r.NetRxBps+r.NetTxBps > 0 || r.Static.WifiIface != "" {
+		line := fmt.Sprintf("↓ %s  ↑ %s", human(r.NetRxBps), human(r.NetTxBps))
+		if r.Static.WifiIface != "" {
+			line += fmt.Sprintf("   Wi-Fi %d dBm", r.Static.WifiDBm)
+		}
+		out = append(out, "  "+p.c(cDim, pad(L("Network", "Ağ"), labelW))+line)
 	}
 	if top := r.GroupCPU(3); len(top) > 0 && top[0].CPU >= 1 {
 		var parts []string
@@ -373,6 +397,24 @@ func Frame(p palette, r Report, fs []Finding, h *Hist, width int, host string, n
 		out = append(out, "  "+p.c(cDim, pad(L("Graphics", "Grafik"), labelW))+p.c(cText, g))
 	}
 	out = append(out, "")
+	if o.Top {
+		out = append(out, rule(p, L("Programs", "Programlar"), width), "")
+		out = append(out, p.c(cDim, fmt.Sprintf("  %-40s %8s %10s %9s", "", "CPU", L("wake-ups/s", "uyanma/sn"), "RAM")))
+		for _, g := range r.GroupCPU(8) {
+			if g.CPU < 0.5 && g.Wakeups < 20 {
+				continue
+			}
+			name := g.Comm
+			if g.Count > 1 {
+				name += fmt.Sprintf(" ×%d", g.Count)
+			}
+			if d := describe(g.Comm); d != "" {
+				name += p.c(cDim, " · "+d)
+			}
+			out = append(out, "  "+pad(clip(name, 40), 40)+fmt.Sprintf(" %7s%% %10s %9s", fl(g.CPU, 0), fl(g.Wakeups, 0), mib(g.RSSKiB)))
+		}
+		out = append(out, "")
+	}
 
 	if len(fs) > 0 {
 		title := L("What is wrong", "Neyin yanlış olduğu")
@@ -381,9 +423,12 @@ func Frame(p palette, r Report, fs []Finding, h *Hist, width int, host string, n
 		}
 		out = append(out, rule(p, title, width), "")
 	}
-	for _, f := range fs {
+	for i, f := range fs {
 		col := cOK
 		mark := "●"
+		if o.Sel == i && len(fs) > 1 {
+			mark = "▸"
+		}
 		switch f.Sev {
 		case Warn:
 			col = cWarn
@@ -481,7 +526,7 @@ func MomentLines(p palette, e Entry, width int) []string {
 		extra += fmt.Sprintf("%.0f °C", e.Temp)
 	}
 	if e.Watts > 0 {
-		extra += fmt.Sprintf("   %.1f W", e.Watts)
+		extra += "   " + fl(e.Watts, 1) + " W"
 	}
 	if extra != "" {
 		out = append(out, "  "+extra)

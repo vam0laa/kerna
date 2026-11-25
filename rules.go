@@ -117,10 +117,7 @@ func Diagnose(r Report) []Finding {
 			if g.CPU < 5 {
 				continue
 			}
-			who := fmt.Sprintf("%s (pid %d)", g.Comm, g.PID)
-			if g.Count > 1 {
-				who = fmt.Sprintf("%s ×%d", g.Comm, g.Count)
-			}
+			who := label(g.Comm, g.PID, g.Count)
 			f.Evidence = append(f.Evidence, fmt.Sprintf("%s %s", who, L(fmt.Sprintf("%.0f%% of one core", g.CPU), fmt.Sprintf("bir çekirdeğin %%%.0f'i", g.CPU))))
 		}
 		if len(groups) > 0 && groups[0].CPU >= 50 {
@@ -231,7 +228,7 @@ func Diagnose(r Report) []Finding {
 		}
 		d3off := dgpu.Vendor == "nvidia" && strings.Contains(strings.ToLower(dgpu.NvidiaD3), "disabled")
 		if d3off {
-			f.Evidence = append(f.Evidence, L("NVIDIA driver: Runtime D3 (the sleep state) is "+strings.ToLower(dgpu.NvidiaD3), "NVIDIA sürücüsü: Runtime D3 (uyku durumu) "+strings.ToLower(dgpu.NvidiaD3)))
+			f.Evidence = append(f.Evidence, L("NVIDIA driver: Runtime D3 (the sleep state) is "+strings.ToLower(dgpu.NvidiaD3), "NVIDIA sürücüsü: Runtime D3 (uyku durumu) "+trD3(dgpu.NvidiaD3)))
 		}
 		switch {
 		case d3off:
@@ -301,23 +298,20 @@ func Diagnose(r Report) []Finding {
 		f := Finding{ID: "battery-drain", Sev: Warn,
 			Title: L("The battery is draining fast", "Pil hızlı tükeniyor"),
 			Why: L(fmt.Sprintf("The system draws %.1f W on battery, which lasts about %.1f hours from now. A quiet laptop is usually 5 to 10 W.", b.Watts, b.HoursLeft),
-				fmt.Sprintf("Sistem pilde %.1f W çekiyor, bu hızla yaklaşık %.1f saat dayanır. Sakin bir dizüstü genelde 5 ila 10 W çeker.", b.Watts, b.HoursLeft)),
+				fmt.Sprintf("Sistem pilde %s W çekiyor, bu hızla yaklaşık %s saat dayanır. Sakin bir dizüstü genelde 5 ila 10 W çeker.", fl(b.Watts, 1), fl(b.HoursLeft, 1))),
 		}
 		for _, g := range r.GroupCPU(3) {
 			if g.CPU < 3 && g.Wakeups < 100 {
 				continue
 			}
-			who := fmt.Sprintf("%s (pid %d)", g.Comm, g.PID)
-			if g.Count > 1 {
-				who = fmt.Sprintf("%s ×%d", g.Comm, g.Count)
-			}
+			who := label(g.Comm, g.PID, g.Count)
 			f.Evidence = append(f.Evidence, fmt.Sprintf("%s %s, %s", who,
 				L(fmt.Sprintf("%.0f%% of one core", g.CPU), fmt.Sprintf("bir çekirdeğin %%%.0f'i", g.CPU)),
 				L(fmt.Sprintf("%.0f wake-ups/s", g.Wakeups), fmt.Sprintf("saniyede %.0f uyanma", g.Wakeups))))
 		}
 		for _, g := range st.GPUs {
 			if g.Watts >= 8 {
-				f.Evidence = append(f.Evidence, L(fmt.Sprintf("the %s GPU alone draws %.1f W", gpuName(g.Vendor), g.Watts), fmt.Sprintf("yalnızca %s ekran kartı %.1f W çekiyor", gpuName(g.Vendor), g.Watts)))
+				f.Evidence = append(f.Evidence, L(fmt.Sprintf("the %s GPU alone draws %.1f W", gpuName(g.Vendor), g.Watts), fmt.Sprintf("yalnızca %s ekran kartı %s W çekiyor", gpuName(g.Vendor), fl(g.Watts, 1))))
 			}
 		}
 		if dgpu != nil && dgpu.Runtime == "active" {
@@ -326,6 +320,36 @@ func Diagnose(r Report) []Finding {
 		f.Evidence = append(f.Evidence, L("ranked by CPU work and wake-ups: the kernel does not report watts per program without root", "CPU işi ve uyanma sayısına göre sıralı: çekirdek root olmadan program başına watt vermez"))
 		f.Hint = "powerprofilesctl set power-saver"
 		out = append(out, f)
+	}
+
+	// 8. The network is losing packets, or the Wi-Fi signal is weak.
+	if r.TCPOut >= 300 && r.RetransPct >= 3 {
+		sev := Warn
+		if r.RetransPct >= 8 {
+			sev = Bad
+		}
+		f := Finding{ID: "net-loss", Sev: sev,
+			Title: L("Network connections are losing packets", "Ağ bağlantıları paket kaybediyor"),
+			Why: L(fmt.Sprintf("%s%% of the TCP segments sent in the last seconds had to be sent again. Pages and downloads feel slow when that happens: usually a weak Wi-Fi signal, a congested line or a bad cable.", fl(r.RetransPct, 1)),
+				fmt.Sprintf("Son saniyelerde gönderilen TCP parçalarının %%%s'i yeniden gönderilmek zorunda kaldı. Bu olunca sayfalar ve indirmeler yavaş hisseder: genelde zayıf Wi-Fi sinyali, tıkalı hat ya da kötü kablo.", fl(r.RetransPct, 1))),
+			Evidence: []string{L(fmt.Sprintf("%d segments sent, %s%% sent again", r.TCPOut, fl(r.RetransPct, 1)), fmt.Sprintf("%d parça gönderildi, %%%s tekrar gönderildi", r.TCPOut, fl(r.RetransPct, 1)))},
+		}
+		if st.WifiIface != "" {
+			f.Evidence = append(f.Evidence, L(fmt.Sprintf("Wi-Fi signal on %s: %d dBm", st.WifiIface, st.WifiDBm), fmt.Sprintf("%s üzerinde Wi-Fi sinyali: %d dBm", st.WifiIface, st.WifiDBm)))
+		}
+		f.Hint = hint("ping -c 20 1.1.1.1", "look at the packet loss and the spread of the times; try the same on a cable or closer to the router", "paket kaybına ve sürelerin dağılımına bak; aynısını kabloyla ya da modeme yakın dene")
+		out = append(out, f)
+	}
+	if st.WifiIface != "" && st.WifiDBm <= -75 {
+		sev := Warn
+		if st.WifiDBm <= -82 {
+			sev = Bad
+		}
+		out = append(out, Finding{ID: "wifi-weak", Sev: sev,
+			Title: L("The Wi-Fi signal is weak", "Wi-Fi sinyali zayıf"),
+			Why: L(fmt.Sprintf("The signal on %s is %d dBm. Below about -70 dBm speeds drop and connections get unreliable.", st.WifiIface, st.WifiDBm),
+				fmt.Sprintf("%s üzerindeki sinyal %d dBm. Yaklaşık -70 dBm'in altında hız düşer ve bağlantılar güvenilmez olur.", st.WifiIface, st.WifiDBm)),
+			Hint: hint("iw dev "+st.WifiIface+" link", "signal, speed and band of the current connection", "mevcut bağlantının sinyali, hızı ve bandı")})
 	}
 
 	// 7. A performance profile while running on battery.
@@ -352,4 +376,18 @@ func Diagnose(r Report) []Finding {
 		out[i].Severity = out[i].Sev.String()
 	}
 	return out
+}
+
+// trD3 translates the driver's own wording of the Runtime D3 status.
+func trD3(s string) string {
+	l := strings.ToLower(s)
+	switch {
+	case strings.Contains(l, "disabled by default"):
+		return "varsayılan olarak kapalı"
+	case strings.Contains(l, "disabled"):
+		return "kapalı"
+	case strings.Contains(l, "enabled"):
+		return "açık"
+	}
+	return l
 }

@@ -40,13 +40,17 @@ a tarball from the [releases](https://github.com/vam0laa/kerna/releases/latest),
 
 ```bash
 kerna                      # sample for 2 seconds and explain what is wrong
-kerna watch                # live view: q quit, p pause, h history
+kerna watch                # live view (keys below)
 kerna --json               # the same diagnosis as JSON, for scripts and status bars
 kerna history              # problems in the last 24 hours (--since 3d for longer)
 kerna history --at 03:12   # what was going on at that moment
 kerna service install      # record history in the background (a systemd user service)
 kerna service uninstall    # stop recording
 ```
+
+`kerna watch` keys: `q` quit, `p` pause, `j`/`k` (or Tab) select a finding, `c` copy its command to the
+clipboard (`wl-copy`, `xclip` or `xsel`), `i` mute it, `t` list the busiest programs (CPU, wake-ups,
+RAM), `h` history of the last 24 hours, `d` today's summary.
 
 `kerna watch` is one calm screen on purpose: a verdict on top, six live lines (a short graph and the
 number), the busiest programs, and below them only what is wrong. No process tables, no tabs, no mouse.
@@ -67,6 +71,24 @@ $ kerna history
 ```
 
 Nothing is recorded until you install the service, and uninstalling it stops it at once.
+
+### Today, and sleep
+
+```
+$ kerna history --today
+  Recorded 6.2 hours, 1488 samples.
+  Battery
+    On battery 4.1 hours, about 98 Wh used, average 24.0 W, highest 41 W at 14:12.
+    ··········▁▁▃▅▅▆▅▃▃▂···          average watts per hour, 00 to 23
+  Busiest programs (average, in percent of one core)
+    qs · Quickshell, your desktop shell     38%
+    firefox                                 21%
+```
+
+`kerna sleep` shows the kernel's suspend counters (how many suspends failed and which device stopped
+one), warns when the machine sleeps in `s2idle` although `deep` is available, and lists long gaps in the
+history on battery with the percent lost per hour. A laptop that is really off drains almost nothing, so
+a high rate means it was asleep and something kept it busy. Needs the history recorder.
 
 ### Why did it freeze?
 
@@ -137,8 +159,12 @@ nobody waits for is not reported.
 | The CPU is slowing itself down | 88 °C or more, clocks under 70% of maximum, CPU busy |
 | A discrete GPU is awake (hybrid laptops) | runtime power state, `power/control`, and for NVIDIA who has `/dev/nvidia*` open |
 | A GPU is almost fully busy | 95% or more: `gpu_busy_percent` (amdgpu), or derived from idle residency (Intel i915 and xe) |
+| Network connections are losing packets | 3% or more of the TCP segments sent had to be sent again (`/proc/net/snmp`), at least 300 segments |
+| The Wi-Fi signal is weak | -75 dBm or worse, when the driver fills `/proc/net/wireless` |
 | A performance power profile is active on battery | `platform_profile` or the CPU energy preference is `performance` while discharging |
 | The battery is draining fast | on battery, 15 W or more; the suspects ranked by CPU work and wake-ups per second (same-name processes added together), the GPU's own watts (amdgpu) and whether the dGPU is awake |
+
+Programs with names people do not recognise get a plain description (`qs · Quickshell, your desktop shell`).
 
 Each finding has a title, the reason, the evidence and one command to try. `kerna` never runs that
 command itself, and it never suggests pausing parts of your desktop session (the compositor,
@@ -171,7 +197,17 @@ PipeWire, ...).
   only name causes that reached the log. It was tried on real logs of a clean shutdown; the
   out-of-memory, graphics and thermal cases were tested with sample log lines. `notify-send` and the
   Waybar module were not run on a live desktop bar or notification daemon yet.
+- The Wi-Fi signal is only available when the driver fills `/proc/net/wireless`; on some chips (for
+  example the MediaTek mt7925 of the laptop kerna was built on) it stays empty, and kerna then relies on
+  the packet loss finding alone. There is no per-program network use without root.
+- The watt-hours in `history --today` are an estimate: the reported draw times the time between samples.
 - History evidence is saved as text in the language of the recording service.
+
+## Quickshell
+
+`contrib/quickshell/KernaStatus.qml` is a small Quickshell window that shows the verdict and the findings,
+refreshed every 10 seconds from `kerna waybar`. Try it with `qs -p contrib/quickshell/KernaStatus.qml`, then
+copy its `Process` and `Timer` into your own shell. How the window looks depends on your compositor rules.
 
 ## Build
 
