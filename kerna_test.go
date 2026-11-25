@@ -334,3 +334,84 @@ func TestSingleIntegratedGPUIsNeverReported(t *testing.T) {
 		t.Fatalf("got %s", ids(got))
 	}
 }
+
+func (f *fixture) wake(pid int, n uint64) {
+	f.write(fmt.Sprintf("proc/%d/status", pid), fmt.Sprintf("Name:\tx\nvoluntary_ctxt_switches:\t%d\nnonvoluntary_ctxt_switches:\t5\n", n))
+}
+
+func TestIntelGPUBusyFromIdleResidency(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	dev := "sys/bus/pci/devices/0000:00:02.0/"
+	f.write(dev+"class", "0x030000")
+	f.write(dev+"vendor", "0x8086")
+	f.write(dev+"boot_vga", "1")
+	f.write(dev+"drm/card0/gt/gt0/rc6_residency_ms", "10000")
+	f.proc(1, "idle", 0, 100, 0, 0)
+	got := f.diagnose(func() {
+		f.write(dev+"drm/card0/gt/gt0/rc6_residency_ms", "10040") // idle 40 ms of the 1000 ms window: 96% busy
+		f.proc(1, "idle", 1, 100, 0, 0)
+	})
+	if ids(got) != "gpu-busy" || !strings.Contains(got[0].Title, "Intel GPU is 96% busy") {
+		t.Fatalf("got %s %+v", ids(got), got)
+	}
+}
+
+func TestIntelGPUIdleIsQuiet(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	dev := "sys/bus/pci/devices/0000:00:02.0/"
+	f.write(dev+"class", "0x030000")
+	f.write(dev+"vendor", "0x8086")
+	f.write(dev+"boot_vga", "1")
+	f.write(dev+"tile0/gt0/gtidle/idle_residency_ms", "500") // the xe layout
+	f.proc(1, "idle", 0, 100, 0, 0)
+	got := f.diagnose(func() {
+		f.write(dev+"tile0/gt0/gtidle/idle_residency_ms", "1500")
+		f.proc(1, "idle", 1, 100, 0, 0)
+	})
+	if len(got) != 0 {
+		t.Fatalf("got %s", ids(got))
+	}
+}
+
+func TestBatterySuspectsAreRankedByCPUAndWakeups(t *testing.T) {
+	f := newFixture(t)
+	f.base("0.00", "0.00", "0.00", 12000000)
+	f.write("sys/class/power_supply/BAT1/status", "Discharging")
+	f.write("sys/class/power_supply/BAT1/capacity", "60")
+	f.write("sys/class/power_supply/BAT1/power_now", "20000000")
+	f.write("sys/class/power_supply/BAT1/energy_now", "40000000")
+	f.write("sys/bus/pci/devices/0000:65:00.0/class", "0x030000")
+	f.write("sys/bus/pci/devices/0000:65:00.0/vendor", "0x1002")
+	f.write("sys/bus/pci/devices/0000:65:00.0/boot_vga", "1")
+	f.write("sys/bus/pci/devices/0000:65:00.0/hwmon/hwmon5/power1_average", "12200000")
+	for i := 0; i < 3; i++ {
+		f.proc(200+i, "firefox", 0, 100, 0, 0)
+		f.wake(200+i, 0)
+	}
+	got := f.diagnose(func() {
+		for i := 0; i < 3; i++ {
+			f.proc(200+i, "firefox", 20, 100, 0, 0)
+			f.wake(200+i, 100)
+		}
+	})
+	if len(got) != 1 || got[0].ID != "battery-drain" {
+		t.Fatalf("got %s", ids(got))
+	}
+	ev := strings.Join(got[0].Evidence, "\n")
+	for _, want := range []string{"firefox ×3 60% of one core, 300 wake-ups/s", "AMD GPU alone draws 12.2 W", "not report watts per program"} {
+		if !strings.Contains(ev, want) {
+			t.Fatalf("missing %q in %s", want, ev)
+		}
+	}
+}
+
+func TestFrameListsTheBusiestPrograms(t *testing.T) {
+	r := Report{Window: time.Second, PSI: map[string]PSI{}, Static: Static{MemTotalKiB: 100, MemAvailKiB: 50},
+		Procs: []Rate{{PID: 1, Comm: "a", CPU: 40}, {PID: 2, Comm: "b", CPU: 20}, {PID: 3, Comm: "b", CPU: 10}}}
+	out := strings.Join(Frame(palette{false}, r, nil, &Hist{}, 80, "h", time.Now(), "", false), "\n")
+	if !strings.Contains(out, "Busiest") || !strings.Contains(out, "a 40%") || !strings.Contains(out, "b ×2 30%") {
+		t.Fatalf("output:\n%s", out)
+	}
+}

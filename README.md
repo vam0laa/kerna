@@ -49,7 +49,7 @@ kerna service uninstall    # stop recording
 ```
 
 `kerna watch` is one calm screen on purpose: a verdict on top, six live lines (a short graph and the
-number), and below them only what is wrong. No process tables, no tabs, no mouse.
+number), the busiest programs, and below them only what is wrong. No process tables, no tabs, no mouse.
 
 ### History: "what happened at 03:12?"
 
@@ -84,8 +84,8 @@ nobody waits for is not reported.
 | Memory is running out | memory stall, little available RAM, or heavy swap traffic; the biggest programs |
 | The CPU is slowing itself down | 88 °C or more, clocks under 70% of maximum, CPU busy |
 | A discrete GPU is awake (hybrid laptops) | runtime power state, `power/control`, and for NVIDIA who has `/dev/nvidia*` open |
-| A GPU is almost fully busy | `gpu_busy_percent` (amdgpu) of 95% or more |
-| The battery is draining fast | on battery, 15 W or more; with the top consumers and whether the dGPU is awake |
+| A GPU is almost fully busy | 95% or more: `gpu_busy_percent` (amdgpu), or derived from idle residency (Intel i915 and xe) |
+| The battery is draining fast | on battery, 15 W or more; the suspects ranked by CPU work and wake-ups per second (same-name processes added together), the GPU's own watts (amdgpu) and whether the dGPU is awake |
 
 Each finding has a title, the reason, the evidence and one command to try. `kerna` never runs that
 command itself, and it never suggests pausing parts of your desktop session (the compositor,
@@ -107,7 +107,9 @@ PipeWire, ...).
   flag, so it is an informed estimate.
 - The discrete-GPU finding works for any vendor, but only the NVIDIA case (the laptop it was
   built on) was seen on real hardware. The AMD and Intel paths are tested against fake sysfs data.
-  GPU busy percent is only reported by the amdgpu driver.
+  Intel GPU busy is derived from idle residency, and amdgpu is the only driver that reports GPU watts.
+- Without root the kernel gives no watts per program (the power counters need root). The battery
+  finding therefore ranks suspects by CPU work and wake-ups, and says so; it never invents watts.
 - History evidence is saved as text in the language of the recording service.
 
 ## Build

@@ -273,17 +273,35 @@ func Diagnose(r Report) []Finding {
 		}
 	}
 
-	// 6. Battery drains fast.
+	// 6. Battery drains fast. The kernel does not tell us watts per program without root,
+	// so the suspects are ranked by CPU work and wake-ups, and said to be exactly that.
 	if b := st.Battery; b != nil && onBattery && b.Watts >= drainWatts {
 		f := Finding{ID: "battery-drain", Sev: Warn,
 			Title: L("The battery is draining fast", "Pil hızlı tükeniyor"),
 			Why: L(fmt.Sprintf("The system draws %.1f W on battery, which lasts about %.1f hours from now. A quiet laptop is usually 5 to 10 W.", b.Watts, b.HoursLeft),
 				fmt.Sprintf("Sistem pilde %.1f W çekiyor, bu hızla yaklaşık %.1f saat dayanır. Sakin bir dizüstü genelde 5 ila 10 W çeker.", b.Watts, b.HoursLeft)),
-			Evidence: names(r.TopCPU(3), coreStr),
+		}
+		for _, g := range r.GroupCPU(3) {
+			if g.CPU < 3 && g.Wakeups < 100 {
+				continue
+			}
+			who := fmt.Sprintf("%s (pid %d)", g.Comm, g.PID)
+			if g.Count > 1 {
+				who = fmt.Sprintf("%s ×%d", g.Comm, g.Count)
+			}
+			f.Evidence = append(f.Evidence, fmt.Sprintf("%s %s, %s", who,
+				L(fmt.Sprintf("%.0f%% of one core", g.CPU), fmt.Sprintf("bir çekirdeğin %%%.0f'i", g.CPU)),
+				L(fmt.Sprintf("%.0f wake-ups/s", g.Wakeups), fmt.Sprintf("saniyede %.0f uyanma", g.Wakeups))))
+		}
+		for _, g := range st.GPUs {
+			if g.Watts >= 8 {
+				f.Evidence = append(f.Evidence, L(fmt.Sprintf("the %s GPU alone draws %.1f W", gpuName(g.Vendor), g.Watts), fmt.Sprintf("yalnızca %s ekran kartı %.1f W çekiyor", gpuName(g.Vendor), g.Watts)))
+			}
 		}
 		if dgpu != nil && dgpu.Runtime == "active" {
-			f.Evidence = append(f.Evidence, L("the NVIDIA GPU is awake (see above)", "NVIDIA ekran kartı uyanık (yukarıya bak)"))
+			f.Evidence = append(f.Evidence, L("the discrete GPU is awake (see above)", "ayrık ekran kartı uyanık (yukarıya bak)"))
 		}
+		f.Evidence = append(f.Evidence, L("ranked by CPU work and wake-ups: the kernel does not report watts per program without root", "CPU işi ve uyanma sayısına göre sıralı: çekirdek root olmadan program başına watt vermez"))
 		f.Hint = "powerprofilesctl set power-saver"
 		out = append(out, f)
 	}

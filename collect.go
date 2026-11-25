@@ -46,8 +46,9 @@ type Proc struct {
 	RSSKiB   int64
 	ReadB    uint64
 	WriteB   uint64
-	HasIO    bool // /proc/PID/io is readable (own processes only without root)
-	HoldsGPU bool // has an NVIDIA device file open (own processes only)
+	HasIO    bool   // /proc/PID/io is readable (own processes only without root)
+	HoldsGPU bool   // has an NVIDIA device file open (own processes only)
+	Wakeups  uint64 // voluntary context switches: how often it went to sleep and was woken again
 }
 
 // PSI is one line of /proc/pressure/*: how long tasks were stalled.
@@ -62,6 +63,7 @@ type Raw struct {
 	PSI       map[string]PSI
 	SwapPages uint64 // pswpin + pswpout
 	MajFaults uint64
+	GPUIdleMs map[string]uint64 // Intel: milliseconds spent in the GPU's idle state, per PCI address
 }
 
 // Static readings that do not need two samples.
@@ -89,11 +91,12 @@ type Battery struct {
 
 type GPU struct {
 	Addr    string
-	Vendor  string // "nvidia", "amd", "intel", other hex
-	Runtime string // active, suspended, ...
-	Control string // "auto" lets the kernel power the GPU down, "on" keeps it always on
-	Boot    bool   // boot_vga: the GPU driving the built-in display on most laptops
-	BusyPct int    // amdgpu only: how busy the GPU is right now, -1 when the driver does not say
+	Vendor  string  // "nvidia", "amd", "intel", other hex
+	Runtime string  // active, suspended, ...
+	Control string  // "auto" lets the kernel power the GPU down, "on" keeps it always on
+	Boot    bool    // boot_vga: the GPU driving the built-in display on most laptops
+	BusyPct int     // how busy the GPU is: amdgpu reports it, Intel is derived from idle residency; -1 when unknown
+	Watts   float64 // amdgpu reports its power draw; 0 when unknown
 }
 
 func parseStatLine(line string) (Proc, bool) {
@@ -196,6 +199,14 @@ func (s Source) readRaw() Raw {
 			continue
 		}
 		pr.PID = pid
+		if t, ok := s.read("proc", e.Name(), "status"); ok {
+			for _, line := range strings.Split(t, "\n") {
+				if v, found := strings.CutPrefix(line, "voluntary_ctxt_switches:"); found {
+					pr.Wakeups, _ = strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+					break
+				}
+			}
+		}
 		if t, ok := s.read("proc", e.Name(), "io"); ok {
 			for _, line := range strings.Split(t, "\n") {
 				k, v, _ := strings.Cut(line, ": ")
@@ -222,7 +233,43 @@ func (s Source) readRaw() Raw {
 		}
 		r.Procs[pid] = pr
 	}
+	r.GPUIdleMs = s.readGPUIdle()
 	return r
+}
+
+// gpuIdleFiles are where Intel drivers publish the time the GPU spent idle:
+// i915 (older and newer layouts) and xe.
+var gpuIdleFiles = []string{
+	"drm/card*/gt/gt0/rc6_residency_ms",
+	"drm/card*/power/rc6_residency_ms",
+	"tile0/gt0/gtidle/idle_residency_ms",
+}
+
+func (s Source) readGPUIdle() map[string]uint64 {
+	out := map[string]uint64{}
+	devs, _ := filepath.Glob(s.p("sys/bus/pci/devices/*"))
+	for _, d := range devs {
+		rel := strings.TrimPrefix(d, s.Root)
+		if v, _ := s.read(rel, "vendor"); v != "0x8086" {
+			continue
+		}
+		if c, _ := s.read(rel, "class"); !strings.HasPrefix(c, "0x03") {
+			continue
+		}
+		for _, pat := range gpuIdleFiles {
+			m, _ := filepath.Glob(filepath.Join(d, pat))
+			if len(m) == 0 {
+				continue
+			}
+			if txt, ok := s.read(strings.TrimPrefix(m[0], s.Root)); ok {
+				if n, err := strconv.ParseUint(txt, 10, 64); err == nil {
+					out[filepath.Base(d)] = n
+					break
+				}
+			}
+		}
+	}
+	return out
 }
 
 func (s Source) readStatic() Static {
@@ -341,6 +388,11 @@ func (s Source) readGPUs() []GPU {
 		bv, _ := s.read(rel, "boot_vga")
 		g.Boot = bv == "1"
 		g.BusyPct = -1
+		if m, _ := filepath.Glob(filepath.Join(d, "hwmon/hwmon*/power1_average")); len(m) > 0 {
+			if uw, ok := s.readInt(strings.TrimPrefix(m[0], s.Root)); ok {
+				g.Watts = float64(uw) / 1e6
+			}
+		}
 		if n, ok := s.readInt(rel, "gpu_busy_percent"); ok {
 			g.BusyPct = int(n)
 		}
@@ -359,6 +411,7 @@ type Rate struct {
 	RSSKiB   int64
 	HoldsGPU bool
 	HasIO    bool
+	Wakeups  float64 // per second
 }
 
 // Report is what the rules look at.
@@ -408,6 +461,16 @@ func Diff(a, b Raw, st Static) Report {
 	if b.MajFaults >= a.MajFaults {
 		rep.MajPerS = float64(b.MajFaults-a.MajFaults) / sec
 	}
+	gpus := append([]GPU(nil), st.GPUs...)
+	for i, g := range gpus {
+		ia, ok1 := a.GPUIdleMs[g.Addr]
+		ib, ok2 := b.GPUIdleMs[g.Addr]
+		if ok1 && ok2 && ib >= ia {
+			busy := 100 - float64(ib-ia)/(sec*1000)*100
+			gpus[i].BusyPct = int(max(0, min(100, busy)) + 0.5)
+		}
+	}
+	rep.Static.GPUs = gpus
 	self := os.Getpid()
 	for pid, pb := range b.Procs {
 		if pid == self {
@@ -420,6 +483,9 @@ func Diff(a, b Raw, st Static) Report {
 		r := Rate{PID: pid, Comm: pb.Comm, RSSKiB: pb.RSSKiB, HoldsGPU: pb.HoldsGPU, HasIO: pb.HasIO}
 		if pb.Ticks >= pa.Ticks {
 			r.CPU = float64(pb.Ticks-pa.Ticks) / clkTck / sec * 100
+		}
+		if pb.Wakeups >= pa.Wakeups {
+			r.Wakeups = float64(pb.Wakeups-pa.Wakeups) / sec
 		}
 		if pb.HasIO && pa.HasIO {
 			if pb.ReadB >= pa.ReadB {
@@ -445,11 +511,12 @@ func (s Source) Sample(window time.Duration) Report {
 // Group is every process with the same name added together, so forty
 // copies of one program show up as one cause instead of forty small ones.
 type Group struct {
-	Comm   string
-	Count  int
-	CPU    float64
-	PID    int // the busiest member
-	maxCPU float64
+	Comm    string
+	Count   int
+	CPU     float64
+	PID     int // the busiest member
+	Wakeups float64
+	maxCPU  float64
 }
 
 func (r Report) GroupCPU(n int) []Group {
@@ -462,6 +529,7 @@ func (r Report) GroupCPU(n int) []Group {
 		}
 		g.Count++
 		g.CPU += p.CPU
+		g.Wakeups += p.Wakeups
 		if p.CPU >= g.maxCPU {
 			g.maxCPU, g.PID = p.CPU, p.PID
 		}

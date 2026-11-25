@@ -253,6 +253,9 @@ func gpuLine(st Static) string {
 		case g.Runtime == "active":
 			s += " " + L("awake", "uyanık")
 		}
+		if g.Watts >= 1 {
+			s += fmt.Sprintf(" %.0f W", g.Watts)
+		}
 		parts = append(parts, s)
 	}
 	return strings.Join(parts, "  ·  ")
@@ -325,6 +328,20 @@ func Frame(p palette, r Report, fs []Finding, h *Hist, width int, host string, n
 			line += p.c(cDim, m.note)
 		}
 		out = append(out, line)
+	}
+	if top := r.GroupCPU(3); len(top) > 0 && top[0].CPU >= 1 {
+		var parts []string
+		for _, g := range top {
+			if g.CPU < 1 {
+				break
+			}
+			n := g.Comm
+			if g.Count > 1 {
+				n += fmt.Sprintf(" ×%d", g.Count)
+			}
+			parts = append(parts, fmt.Sprintf("%s %.0f%%", n, g.CPU))
+		}
+		out = append(out, "  "+p.c(cDim, pad(L("Busiest", "En yoğun"), labelW))+strings.Join(parts, p.c(cDim, "  ·  ")))
 	}
 	if g := gpuLine(r.Static); g != "" {
 		out = append(out, "  "+p.c(cDim, pad(L("Graphics", "Grafik"), labelW))+p.c(cText, g))
